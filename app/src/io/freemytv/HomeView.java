@@ -88,7 +88,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final long TOAST_MS = 6000, FADE_MS = 800;
     /** Blur radii of the shadow and shadowDeep paints (Shadows needs them to draw the same blur on older TVs). */
     private static final float SHADOW_BLUR = 26, DEEP_BLUR = 30;
-    private static final int SKY = 0, HERO = 1, STATUS = 2, PLATTER = 3, TILES = 4, DRAWER = 5, SHEET = 6, TOAST = 7;
+    private static final int SKY = 0, HERO = 1, STATUS = 2, PLATTER = 3, TILES = 4, DRAWER = 5, SHEET = 6, TOAST = 7,
+            HA = 8;
     private static final int Z_STATUS = 0, Z_HERO = 1, Z_SHELF = 2, Z_DRAWER = 3;
     private static final ExecutorService LOADER = Executors.newSingleThreadExecutor();
     // Light design (the L_ constants): title, tab bar, three recommendation cards and the shelf.
@@ -98,10 +99,22 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final float L_PLATTER_TOP = 814, L_TILE_H = 126;
     private static final float L_DATE_BASE = 330, L_CLOCK_BASE = 540, L_WEATHER_BASE = 626, L_QUOTES_BASE = 694;
     private static final int L_INK = 0xFF1D1D1F, L_DIM = 0xFF6E6E73, L_FAINT = 0xFF8E8E93;
+    // Below the clock and the picks the screen splits in two: the shelf on the left, the Home Assistant panel on the
+    // right. Both share one band (the shelf's glass keeps its bottom edge at 980). Four apps fit on the left; more
+    // scroll with the focus, as the shelf always did.
+    private static final float L_COL_L = MARGIN, L_COL_R = 960;
+    private static final int SHELF_SLOTS = 4;
+    private static final float HA_L = 1010, HA_R = CONTENT_R, HA_TOP = 774, HA_BOT = 980;
+    // The panel: its name and whether Home Assistant answers, then two rows of three glass cards.
+    private static final float HA_PAD = 18, HA_HEAD = 26, HA_CELL_R = 14;
+    /** The panes' corner radius: the shelf's (TILE_RADIUS + SHELF_PAD), so both halves of the split look alike. */
+    private static final float HA_RADIUS = TILE_RADIUS + SHELF_PAD;
+    private static final int HA_COLUMNS = 3, HA_COUNT = 6, HA_LIGHTS = 0, HA_MASTER = 1, HA_DREAMVIEW = 2,
+            HA_BRIGHTNESS = 3, HA_COZY = 4, HA_DAYLIGHT = 5;
     private static String[] tabs;
     private static int tabsGeneration = -1;
     private static final String[] TAB_KIND = {null, "movie", "tv"};
-    private static final int Z_TOP = 4, Z_CARDS = 5;
+    private static final int Z_TOP = 4, Z_CARDS = 5, Z_HA = 6;
 
     private final Activity activity;
     private final Scene scene = new Scene();
@@ -124,7 +137,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         @Override public void hold(int id) { a11yHold(); }
     });
     private final RectF a11yRect = new RectF();
-    private final Layer sky, heroLayer, status, platter, tiles, drawerLayer, sheetLayer, toastLayer;
+    private final Layer sky, heroLayer, status, platter, tiles, drawerLayer, sheetLayer, toastLayer, haLayer;
     private int zone = Z_SHELF;
 
     // Night look (like Apple's "Automatic" appearance): darker from sunset to sunrise, with a 2 s transition.
@@ -146,6 +159,25 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private final RectF[] topRects = new RectF[3 + HomeApps.MAX_TOP];
     private final Spring[] cardFocus = new Spring[3];
     private final RectF[] cardRects = new RectF[3];
+
+    // Home Assistant panel (right of the shelf): its own glass, six cards and their focus.
+    private final HomeAssistant ha = new HomeAssistant();
+    private final RectF haRect = new RectF();
+    private final RectF[] haRects = new RectF[HA_COUNT];
+    private final Spring[] haFocus = new Spring[HA_COUNT];
+    private int haIndex;
+    private boolean haDirty;
+    private Paint haTitle, haHint, haLabel, haValue;
+    private final Paint haFill = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final HomeAssistant.Listener haListener = new HomeAssistant.Listener() {
+        @Override public void onState() {
+            haDirty = true;
+            wake();
+        }
+        @Override public void onError(String why) {
+            showToast(why);
+        }
+    };
     private final List<HomeApps.Item> lightButtons = new ArrayList<>();
     private Paint lTitle, lTab, lTabOn, lCardTitle, lCardMeta, lQuote, lTip, lDate, lClock, lWeather, lClockQuote;
     private Shader lightGradient;
@@ -324,6 +356,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 case TILES: drawTiles(c); break;
                 case DRAWER: drawDrawer(c); break;
                 case SHEET: drawSheet(c); break;
+                case HA: drawHa(c); break;
                 default: drawToast(c); break;
             }
             scene.setOffset(0, 0);
@@ -376,7 +409,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             bounceBars();
         });
         click = new Click(a);
-        shelfVisible = HomeApps.shelfVisible(a);
+        shelfVisible = Math.min(HomeApps.shelfVisible(a), SHELF_SLOTS);   // what fits left of the Home Assistant panel
         ui = a.getSharedPreferences("home-ui", Context.MODE_PRIVATE);
         tvInputs = (TvInputManager) a.getSystemService(Context.TV_INPUT_SERVICE);
         launcherApps = (LauncherApps) a.getSystemService(Context.LAUNCHER_APPS_SERVICE);
@@ -390,12 +423,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         drawerLayer = new Layer(a, DRAWER);
         sheetLayer = new Layer(a, SHEET);
         toastLayer = new Layer(a, TOAST);
+        haLayer = new Layer(a, HA);
         // Hardware layers on the GPU: only the one that changed is redrawn; moving, fading and scaling stay cheap.
         // Not on Android 8 to 11: on older GPUs (a Mi Box 3's Mali-450) redrawing and compositing a big layer on every
         // frame cost more than drawing straight to the screen (measured: focus on the picks 33 → 12 ms a frame, the
         // drawer 19 → 17 ms).
-        for (View v : new View[] {heroLayer, status, platter, tiles, drawerLayer, sheetLayer}) v.setLayerType(Ui.LEGACY ? LAYER_TYPE_NONE : LAYER_TYPE_HARDWARE, null);
-        for (View v : new View[] {sky, heroLayer, status, platter, tiles, drawerLayer, sheetLayer, toastLayer}) {
+        for (View v : new View[] {heroLayer, status, platter, tiles, drawerLayer, sheetLayer, haLayer}) v.setLayerType(Ui.LEGACY ? LAYER_TYPE_NONE : LAYER_TYPE_HARDWARE, null);
+        for (View v : new View[] {sky, heroLayer, status, platter, tiles, drawerLayer, sheetLayer, toastLayer, haLayer}) {
             v.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);   // TalkBack reads the items (Spoken)
             addView(v);
         }
@@ -408,6 +442,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         for (int i = 0; i < 3; i++) {
             cardFocus[i] = new Spring(0.32f, 0.78f, 0);
             cardRects[i] = new RectF();
+        }
+        for (int i = 0; i < HA_COUNT; i++) {
+            haFocus[i] = new Spring(0.3f, 0.8f, 0);
+            haRects[i] = new RectF();
         }
         setLightButtons(HomeApps.topButtons());
         recs.setLight(true);
@@ -448,6 +486,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (tvInputs != null) tvInputs.registerCallback(inputCallback, handler);
         handler.postDelayed(tick, 15_000);
         playing.start();
+        ha.start(haListener);   // the panel's states, every few seconds while this screen shows
         checkNotices();
         if (!again) reload();
         updatePalette();
@@ -479,6 +518,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         handler.removeCallbacks(reloadSoon);
         handler.removeCallbacks(bars);
         playing.stop();
+        ha.stop();
         data.removeListener(this);
         recs.removeListener(this);
         if (tvInputs != null) tvInputs.unregisterCallback(inputCallback);
@@ -552,7 +592,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private void invalidateAll() {
-        for (View v : new View[] {sky, heroLayer, status, platter, tiles, drawerLayer}) v.invalidate();
+        for (View v : new View[] {sky, heroLayer, status, platter, tiles, drawerLayer, haLayer}) v.invalidate();
     }
 
     // MARK: - Size and layers
@@ -570,6 +610,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         measure(drawerLayer, width, Math.round(600 * kk));
         measure(sheetLayer, width, height);
         measure(toastLayer, Math.round(1000 * kk), Math.round(220 * kk));
+        // The panel's layer holds its glass and the focus glow around the cards.
+        measure(haLayer, Math.round((HA_R - HA_L + 40) * kk), Math.round((HA_BOT - HA_TOP + 40) * kk));
         setMeasuredDimension(width, height);
     }
 
@@ -590,6 +632,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         sheetLayer.setPivotX(width / 2f);
         sheetLayer.setPivotY(height / 2f);
         place(toastLayer, (width - toastLayer.getMeasuredWidth()) / 2, 0);
+        place(haLayer, Math.round((HA_L - 20) * kk), Math.round((HA_TOP - 20) * kk));
     }
 
     private static void place(View v, int x, int y) {
@@ -612,6 +655,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         layoutStatus();
         layoutDrawer();
         layoutLight();
+        layoutHa();
         hero = null;
         heroFrom = null;
         updatePicks();
@@ -644,6 +688,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lClock.setLetterSpacing(-0.01f);
         lWeather = Ui.text(Ui.medium, 34 * k, L_DIM);
         lClockQuote = Ui.numbers(Ui.medium, 28 * k, L_DIM);
+        haTitle = Ui.text(Ui.semibold, 21 * k, L_DIM);
+        haTitle.setLetterSpacing(0.06f);
+        haHint = Ui.text(Ui.medium, 19 * k, L_FAINT);
+        haHint.setTextAlign(Paint.Align.RIGHT);
+        haLabel = Ui.text(Ui.semibold, 22 * k, L_INK);
+        haValue = Ui.numbers(Ui.medium, 21 * k, L_DIM);
+        haValue.setTextAlign(Paint.Align.RIGHT);
         lightGradient = null;
         buttonPaint = Ui.text(Ui.semibold, 29 * k, INK);
         capsuleText = Ui.numbers(Ui.medium, 29 * k, 0xF2FFFFFF);
@@ -707,6 +758,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         heroMoving |= topMoving | cardsMoving;
         boolean drawerItemsMoving = step(drawerFocus, dt);
         boolean gridMoving = step(gridFocus, dt) | scroll.step(dt);
+        boolean haMoving = step(haFocus, dt);
         boolean drawerMoving = drawer.step(dt);
         boolean sheetMoving = sheet.step(dt);
         boolean toastFading = tickToast(up);
@@ -724,10 +776,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (heroMoving || heroDirty || heroFading) heroLayer.invalidate();
         if (drawerItemsMoving || drawerDirty || bgFading) drawerLayer.invalidate();
         if (gridMoving || gridDirty) sheetLayer.invalidate();
+        if (haMoving || haDirty) haLayer.invalidate();
         if (drawerMoving || bgFading) sky.invalidate();
-        if (bgFading || (drawerWasMoving && !drawerMoving)) platter.invalidate();
+        if (bgFading || (drawerWasMoving && !drawerMoving)) {
+            platter.invalidate();
+            haLayer.invalidate();   // its glass reads the background again, where it ended up
+        }
         drawerWasMoving = drawerMoving;
-        tilesDirty = statusDirty = heroDirty = drawerDirty = gridDirty = motionDirty = false;
+        tilesDirty = statusDirty = heroDirty = drawerDirty = gridDirty = motionDirty = haDirty = false;
         if (updateClock()) {
             layoutStatus();
             status.invalidate();
@@ -739,7 +795,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
 
         // Busy: something is moving, or the sheet or the drawer is open.
-        boolean busy = tilesMoving || statusMoving || heroMoving || drawerItemsMoving || gridMoving || drawerMoving
+        boolean busy = tilesMoving || statusMoving || heroMoving || drawerItemsMoving || gridMoving || drawerMoving || haMoving
                 || sheetMoving || toastFading || heroFading || bgFading || nightMoving || sheetOpen || sheet.value > 0.001f
                 || drawerOpen || drawer.value > 0.001f || toast != null || !toasts.isEmpty();
         idle = !busy;
@@ -771,6 +827,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         show(status, top, lift);
         show(platter, home, lift);
         show(tiles, home, lift);
+        show(haLayer, home, lift);
         float da = home * smoothstep(0.1f, 0.6f, dc);
         drawerLayer.setTranslationY((1 - d) * shift);
         drawerLayer.setAlpha(da);
@@ -990,9 +1047,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         } else if (bgFadeAt == 0 && bgTo == null) {
             neutralGlass();
         }
-        heroDirty = statusDirty = tilesDirty = drawerDirty = true;
+        heroDirty = statusDirty = tilesDirty = drawerDirty = haDirty = true;
         sky.invalidate();
         platter.invalidate();
+        haLayer.invalidate();
     }
 
     /** How dark it is: 0 = day, 1 = night (in between during the transition). */
@@ -1200,18 +1258,20 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private void layoutShelf() {
         int n = Math.min(shelf.size(), shelfVisible);
-        float pad = SHELF_PAD * k, gap = TILE_GAP * k;
-        float full = (CONTENT_R - MARGIN) * k;
-        // Tiles in the TV banners' own 16:9, so an app's art is never stretched; never taller than L_TILE_H. The glass
-        // keeps its bottom edge, so with more apps it only gets lower.
+        float gap = TILE_GAP * k;
+        // The tiles fill the column up to the glass's padding, so the glass itself sits exactly in the left half.
+        float full = (L_COL_R - L_COL_L - 2 * SHELF_PAD) * k;
+        // Tiles in the TV banners' own 16:9, so an app's art is never stretched; never taller than L_TILE_H.
         float tw = Math.min(L_TILE_H * 16f / 9 * k, (full - Math.max(0, n - 1) * gap) / Math.max(1, n));
         float th = tw * 9f / 16;
-        float width = n * tw + Math.max(0, n - 1) * gap, left = (w - width) / 2f;
-        float top = (L_PLATTER_TOP + L_TILE_H) * k - th;
-        platterRect.set(left - pad, top, left + width + pad, top + th + 2 * pad);
+        float width = n * tw + Math.max(0, n - 1) * gap, left = (L_COL_L + SHELF_PAD) * k + (full - width) / 2f;
+        // The glass is the left pane of the split screen, as tall as the Home Assistant panel on the right; the tiles
+        // sit in the middle of it.
+        platterRect.set(L_COL_L * k, HA_TOP * k, L_COL_R * k, HA_BOT * k);
         snap(platterRect);
+        float top = platterRect.centerY() - th / 2;
         shelfFirst = Math.max(0, Math.min(shelfFirst, shelf.size() - n));
-        float x = left - shelfFirst * (tw + gap), y = top + pad;
+        float x = left - shelfFirst * (tw + gap), y = top;
         for (int i = 0; i < shelf.size(); i++) {
             tileRects[i].set(x, y, x + tw, y + th);
             snap(tileRects[i]);
@@ -1885,6 +1945,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         boolean heroChanged = heroFocus.target != (!sheetOpen && zone == Z_HERO ? 1 : 0);
         heroFocus.target = !sheetOpen && zone == Z_HERO ? 1 : 0;
         if (snap) heroFocus.snap(heroFocus.target);
+        boolean haChanged = aim(haFocus, !sheetOpen && zone == Z_HA ? haIndex : -1, snap);
         boolean topChanged = aim(topFocus, !sheetOpen && zone == Z_TOP ? topIndex : -1, snap);
         heroChanged |= aim(cardFocus, !sheetOpen && zone == Z_CARDS ? cardIndex : -1, snap) | topChanged;
         statusChanged |= topChanged;
@@ -1892,6 +1953,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         statusDirty |= snap || statusChanged;
         heroDirty |= snap || heroChanged;
         drawerDirty |= snap || drawerChanged;
+        haDirty |= snap || haChanged;
         spoken.focusMoved();
     }
 
@@ -2403,6 +2465,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             if (p == null || p.pkg == null) return;
             it = HomeApps.app(p.pkg, Recs.serviceName(p), p.link);
             r = cardRects[cardIndex];
+        } else if (zone == Z_HA) {
+            haActivate();
+            return;
         } else {
             if (shelf.isEmpty()) return;
             it = shelf.get(shelfIndex);
@@ -2683,6 +2748,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         for (int i = picksOn() ? 0 : 3; i < 3 + lightButtons.size(); i++) out.add(a11yId(Z_TOP, i));
         for (int i = 0; i < Math.min(3, cards.size()); i++) out.add(a11yId(Z_CARDS, i));
         for (int i = shelfFirst; i < Math.min(shelf.size(), shelfFirst + shelfVisible); i++) out.add(a11yId(Z_SHELF, i));
+        for (int i = 0; i < HA_COUNT; i++) out.add(a11yId(Z_HA, i));
         for (int i = 0; i < drawerItems.size(); i++) out.add(a11yId(Z_DRAWER, i));
         if (drawerOpen && Prefs.weather()) out.add(a11yId(WIDGETS, 0));
         if (drawerOpen && Prefs.quotes() && HomeData.active().length > 0) out.add(a11yId(WIDGETS, 1));
@@ -2705,6 +2771,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 }
                 return label(shelf, i);
             case Z_DRAWER: return label(drawerItems, i);
+            case Z_HA: return haText(i);
             case WIDGETS: return i == 0 ? weatherText() : quotesText();
             default: return "";
         }
@@ -2747,6 +2814,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 a11yRect.set(drawerRects[i]);
                 dy = drawerOpen ? 0 : h;
                 break;
+            case Z_HA:
+                if (i >= HA_COUNT) return false;
+                a11yRect.set(haRects[i]);
+                dy = haLayer.getTranslationY();
+                break;
             case WIDGETS:
                 if (!drawerOpen) return false;
                 a11yRect.set(i == 0 ? weatherCard : quotesCard);
@@ -2770,6 +2842,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             case Z_CARDS: return cardIndex < cards.size() ? a11yId(Z_CARDS, cardIndex) : -1;
             case Z_SHELF: return shelf.isEmpty() ? -1 : a11yId(Z_SHELF, shelfIndex);
             case Z_DRAWER: return drawerItems.isEmpty() ? -1 : a11yId(Z_DRAWER, drawerIndex);
+            case Z_HA: return a11yId(Z_HA, haIndex);
             case WIDGETS: return a11yId(WIDGETS, widgetIndex);
             default: return -1;
         }
@@ -2829,6 +2902,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 if (i >= shelf.size()) return;
                 if (drawerOpen) closeDrawer();
                 shelfIndex = i;
+                break;
+            case Z_HA:
+                if (i >= HA_COUNT) return;
+                if (drawerOpen) closeDrawer();
+                haIndex = i;
                 break;
             default:
                 return;
@@ -3172,6 +3250,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private boolean moveLight(int dx, int dy) {
         switch (zone) {
             case Z_SHELF:
+                if (dx > 0 && shelfIndex >= shelf.size() - 1) {
+                    zone = Z_HA;    // the right end of the shelf: the Home Assistant panel
+                    haIndex = HA_LIGHTS;
+                    break;
+                }
                 // Up from an empty shelf too: move()'s older zones (the hero, the corner capsule) aren't drawn any more.
                 if (dy >= 0) return false;
                 if (cards.isEmpty()) {
@@ -3215,6 +3298,34 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     return true;
                 }
                 break;
+            case Z_HA:
+                if (dx != 0) {
+                    if (haIndex == HA_BRIGHTNESS) {   // ← and → set the brightness while it has the focus
+                        ha.adjustBrightness(dx * HomeAssistant.STEP);
+                        return true;
+                    }
+                    int col = haIndex % HA_COLUMNS, next = col + dx;
+                    if (next < 0 || next >= HA_COLUMNS) {
+                        if (next < 0 && col == 0 && haIndex < HA_COLUMNS) {
+                            zone = Z_SHELF;   // left from the top row: back to the apps
+                            if (!shelf.isEmpty()) shelfIndex = Math.min(shelfIndex, shelf.size() - 1);
+                            break;
+                        }
+                        return true;    // the panel's own edge
+                    }
+                    haIndex = (haIndex / HA_COLUMNS) * HA_COLUMNS + next;
+                } else if (dy < 0) {
+                    if (haIndex < HA_COLUMNS) return true;
+                    haIndex -= HA_COLUMNS;
+                } else if (haIndex < HA_COLUMNS) {
+                    haIndex += HA_COLUMNS;
+                } else if (drawerItems.isEmpty()) {
+                    return true;
+                } else {
+                    openDrawer();   // down from the panel, as from the shelf: the drawer
+                    break;
+                }
+                break;
             default:
                 return false;
         }
@@ -3234,6 +3345,197 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             }
         }
         return best;
+    }
+
+    // MARK: - Home Assistant panel: the right column of the split screen
+
+    /** The six cards: three columns, two rows, under the panel's name. */
+    private void layoutHa() {
+        if (haTitle == null) return;
+        haRect.set(Math.round(HA_L * k), Math.round(HA_TOP * k), Math.round(HA_R * k), Math.round(HA_BOT * k));
+        float pad = HA_PAD * k, gap = 14 * k;
+        float top = haRect.top + pad + HA_HEAD * k + 4 * k, bottom = haRect.bottom - pad;
+        float bw = (haRect.width() - 2 * pad - 2 * gap) / HA_COLUMNS, bh = (bottom - top - gap) / 2;
+        for (int i = 0; i < HA_COUNT; i++) {
+            float x = haRect.left + pad + (i % HA_COLUMNS) * (bw + gap);
+            float y = top + (i / HA_COLUMNS) * (bh + gap);
+            haRects[i].set(x, y, x + bw, y + bh);
+            snap(haRects[i]);
+        }
+        for (int i = 0; i < HA_COUNT; i++) {
+            String symbol = haSymbol(i);
+            if (symbol != null) Symbols.warm(getContext(), symbol, 24 * k);   // sized ahead of time, as everywhere else
+        }
+        haDirty = true;
+    }
+
+    private static String haSymbol(int i) {
+        switch (i) {
+            case HA_DREAMVIEW: return "sparkles";
+            case HA_BRIGHTNESS: return "sunny";
+            case HA_COZY: return "sunset";
+            case HA_DAYLIGHT: return "sunrise";
+            default: return null;   // the two light switches draw the bulb below
+        }
+    }
+
+    private static String haName(int i) {
+        switch (i) {
+            case HA_LIGHTS: return Ui.tr("Lights On/Off");
+            case HA_MASTER: return Ui.tr("All Lights");
+            case HA_DREAMVIEW: return "Dreamview";
+            case HA_BRIGHTNESS: return Ui.tr("Brightness");
+            case HA_COZY: return "Cozy Orange";
+            default: return Ui.tr("Daylight");
+        }
+    }
+
+    /** What the entity says: the cards that are on glow, and the scene buttons never do. */
+    private boolean haActive(int i) {
+        switch (i) {
+            case HA_LIGHTS: return ha.areaOn;
+            case HA_MASTER: return ha.masterOn;
+            case HA_DREAMVIEW: return ha.dreamviewOn;
+            default: return false;
+        }
+    }
+
+    /** The panel: its glass, its name, whether Home Assistant answers, and the six cards. */
+    private void drawHa(Canvas c) {
+        // These paints aren't in applyTone: the night look sets them here.
+        haTitle.setColor(tone(L_DIM, 0xFF98989D));
+        haHint.setColor(tone(L_FAINT, 0x99FFFFFF));
+        haLabel.setColor(tone(L_INK, WHITE));
+        haValue.setColor(tone(L_DIM, 0xB0FFFFFF));
+        // The section's glass, as the shelf's: white by day, smoked at night.
+        scene.liquid(c, haRect, HA_RADIUS * k, tone(0xFFFFFFFF, SMOKE), tone(0.3f, 0.14f), tone(0.03f, 0.08f),
+                tone(26, 30) * k, tone(18, 24) * k, tone(0.6f, 0.9f), 1);
+        float base = haRect.top + HA_PAD * k + Ui.cap(haTitle);
+        c.drawText(Ui.tr("Home Assistant"), haRect.left + HA_PAD * k, base, haTitle);
+        boolean offline = ha.asked && !ha.online;
+        String note = !ha.ready() ? Ui.tr("Not set up") : offline ? Ui.tr("Offline") : "";
+        if (!note.isEmpty()) {
+            float right = haRect.right - HA_PAD * k;
+            c.drawText(note, right, base, haHint);
+            haFill.setColor(offline ? 0xFFFF9F0A : tone(0xFF8E8E93, 0xB0FFFFFF));
+            c.drawCircle(right - haHint.measureText(note) - 10 * k, base - Ui.halfCap(haHint), 4 * k, haFill);
+        }
+        for (int i = 0; i < HA_COUNT; i++) drawHaCard(c, i);
+    }
+
+    /**
+     * One card: its glass with a 1 px white edge, the icon and the name (and, for the brightness, the bar). On, it
+     * warms up and glows; focused, it grows a little and gets a bright, high-contrast edge under a soft halo.
+     */
+    private void drawHaCard(Canvas c, int i) {
+        RectF r = haRects[i];
+        float f = Ui.clamp(haFocus[i].value), s = 1 + 0.04f * f;
+        boolean on = haActive(i);
+        float cx = r.centerX(), cy = r.centerY(), rad = HA_CELL_R * k * s;
+        cell.set(cx - r.width() * s / 2, cy - r.height() * s / 2, cx + r.width() * s / 2, cy + r.height() * s / 2);
+        if (on || f > 0.01f) {
+            tmp.set(cell);
+            if (on) {
+                shadowSoft.setColor(Ui.alpha(0xFFFF9F0A, 0.2f + 0.25f * f));
+                shadows.draw(c, tmp, rad, 12 * k, shadowSoft);   // the radius shadowSoft's blur was made with
+            }
+            if (f > 0.01f) {
+                shadowSoft.setColor(Ui.alpha(0xFFFFFFFF, 0.45f * f));
+                shadows.draw(c, tmp, rad, 12 * k, shadowSoft);
+            }
+        }
+        scene.liquid(c, cell, rad, on ? 0xFFFFB067 : tone(0xFFFFFFFF, SMOKE),
+                on ? 0.2f + 0.12f * f : tone(0.1f, 0.14f) + 0.06f * f, 0.02f, 10 * k, 8 * k,
+                tone(0.35f, 0.55f), 1);
+        border.setColor(Ui.alpha(on ? 0xFFFFD9B0 : 0xFFFFFFFF, (on ? 0.45f : 0.24f) + 0.5f * f));
+        border.setStrokeWidth((1 + 1.5f * f) * k);
+        c.drawRoundRect(cell, rad, rad, border);
+        border.setStrokeWidth(2 * k);
+        int ink = tone(on ? 0xFFB45309 : L_INK, on ? 0xFFFFC08A : WHITE);
+        int dim = tone(on ? 0xFF92400E : L_FAINT, on ? 0xB8FFC08A : 0xA0FFFFFF);
+        float icon = 24 * k, ix = cell.left + 18 * k + icon / 2, iy = i == HA_BRIGHTNESS ? cy - 5 * k : cy;
+        String symbol = haSymbol(i);
+        if (symbol != null) Symbols.draw(getContext(), c, symbol, ix, iy, icon, ink);
+        else drawBulb(c, ix, iy, icon, ink, i == HA_LIGHTS);   // the area's lights: mdi:lightbulb-group
+        float tx = ix + icon / 2 + 12 * k, right = cell.right - 18 * k;
+        haLabel.setColor(ink);
+        String name = haName(i);
+        if (i != HA_BRIGHTNESS) {
+            fitPaint.set(haLabel);
+            c.drawText(TextUtils.ellipsize(name, fitPaint, Math.max(1, right - tx), TextUtils.TruncateAt.END).toString(),
+                    tx, cell.centerY() + Ui.halfCap(haLabel), haLabel);
+            return;
+        }
+        String pct = ha.brightness < 0 ? "—" : ha.brightness + "%";
+        haValue.setColor(dim);
+        float textBase = cell.top + 24 * k + Ui.halfCap(haLabel);
+        c.drawText(pct, right, textBase, haValue);
+        fitPaint.set(haLabel);
+        c.drawText(TextUtils.ellipsize(name, fitPaint, Math.max(1, right - tx - haValue.measureText(pct) - 8 * k),
+                TextUtils.TruncateAt.END).toString(), tx, textBase, haLabel);
+        // The bar, filled to the value with a knob at its end (10% steps: ← and → while it has the focus).
+        float barTop = cell.bottom - 16 * k, barH = 6 * k, fill = right - tx;
+        if (ha.brightness >= 0) fill = (right - tx) * ha.brightness / 100f;
+        tmp.set(tx, barTop, right, barTop + barH);
+        haFill.setColor(Ui.alpha(ink, 0.22f));
+        c.drawRoundRect(tmp, barH / 2, barH / 2, haFill);
+        if (fill > 0) {
+            tmp.right = tx + fill;
+            haFill.setColor(Ui.alpha(ink, 0.9f));
+            c.drawRoundRect(tmp, barH / 2, barH / 2, haFill);
+        }
+        if (ha.brightness >= 0) {
+            haFill.setColor(ink);
+            c.drawCircle(tx + fill, barTop + barH / 2, 6 * k, haFill);
+        }
+    }
+
+    /** The lightbulb (two for All Lights): the symbol set has no lights, so it is drawn here. */
+    private void drawBulb(Canvas c, float cx, float cy, float size, int color, boolean group) {
+        border.setColor(color);
+        border.setStrokeWidth(Math.max(1, 1.7f * k));
+        if (group) {
+            bulb(c, cx - size * 0.18f, cy, size * 0.19f, color);
+            bulb(c, cx + size * 0.18f, cy, size * 0.19f, color);
+        } else {
+            bulb(c, cx, cy, size * 0.25f, color);
+        }
+        border.setStrokeWidth(2 * k);
+    }
+
+    private void bulb(Canvas c, float cx, float cy, float r, int color) {
+        c.drawCircle(cx, cy - r * 0.25f, r, border);
+        haFill.setColor(color);
+        c.drawRect(cx - r * 0.42f, cy + r * 0.7f, cx + r * 0.42f, cy + r * 1.25f, haFill);
+    }
+
+    /** OK on a card: the service its name says. */
+    private void haActivate() {
+        if (!HomeAssistant.configured()) {
+            showToast(Ui.tr("Set up Home Assistant in Settings."));
+            return;
+        }
+        click.open();
+        switch (haIndex) {
+            case HA_LIGHTS: ha.toggleArea(); break;
+            case HA_MASTER: ha.toggleMaster(); break;
+            case HA_DREAMVIEW: ha.toggleDreamview(); break;
+            case HA_BRIGHTNESS: ha.setBrightness(ha.brightness < 0 ? 50 : ha.brightness); break;
+            case HA_COZY: ha.scene(HomeAssistant.SCENE_COZY); break;
+            default: ha.scene(HomeAssistant.SCENE_DAYLIGHT); break;
+        }
+    }
+
+    /** A card as TalkBack reads it: its name, and what its entity says. */
+    private String haText(int i) {
+        String name = haName(i);
+        switch (i) {
+            case HA_LIGHTS: return name + ", " + (ha.areaOn ? Ui.tr("On") : Ui.tr("Off"));
+            case HA_MASTER: return name + ", " + (ha.masterOn ? Ui.tr("On") : Ui.tr("Off"));
+            case HA_DREAMVIEW: return name + ", " + (ha.dreamviewOn ? Ui.tr("On") : Ui.tr("Off"));
+            case HA_BRIGHTNESS: return ha.brightness < 0 ? name : name + ", " + ha.brightness + "%";
+            default: return name;
+        }
     }
 
     // MARK: - Helpers
