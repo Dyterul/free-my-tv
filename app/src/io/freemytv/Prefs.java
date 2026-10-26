@@ -180,6 +180,16 @@ final class Prefs {
     static boolean coin(int i) { return sp().getBoolean("coin" + i, true); }
     static void setCoin(int i, boolean on) { put("coin" + i, on); }
 
+    // MARK: - Home Assistant
+
+    /** The panel's server, as typed on the TV; config.properties gives it until then. */
+    static String haUrl() { return sp().getString("haUrl", Config.HA_URL).trim(); }
+    static void setHaUrl(String v) { put("haUrl", v.trim()); }
+
+    /** Its long-lived access token, as typed on the TV; config.properties gives it until then. */
+    static String haToken() { return sp().getString("haToken", Config.HA_TOKEN).trim(); }
+    static void setHaToken(String v) { put("haToken", v.trim()); }
+
     // MARK: - Shelf
 
     /** Packages on the home shelf, in order; null until the user edits it (then the built-in list applies). */

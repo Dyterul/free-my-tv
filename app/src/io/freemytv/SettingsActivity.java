@@ -733,6 +733,9 @@ public class SettingsActivity extends Activity {
             l.add("Ethereum");
             l.add("Solana");
             if (dollar()) l.add(Ui.tr("Dollar"));
+            // The split screen's Home Assistant panel: typed here, they win over config.properties.
+            l.add(Ui.tr("Home Assistant"));
+            l.add(Ui.tr("Home Assistant token"));
             return l.toArray(new String[0]);
         }
 
@@ -756,7 +759,9 @@ public class SettingsActivity extends Activity {
             v[PLAYING_ROW] = onOff(Prefs.nowPlaying());
             v[QUOTES_ROW] = onOff(Prefs.quotes());
             // No quotes widget, nowhere to show prices: the coins read as off (and stay locked) until it is back on.
-            for (int i = COIN_ROWS; i < v.length; i++) v[i] = onOff(Prefs.quotes() && Prefs.coin(i - COIN_ROWS));
+            for (int i = COIN_ROWS; i < v.length - 2; i++) v[i] = onOff(Prefs.quotes() && Prefs.coin(i - COIN_ROWS));
+            v[v.length - 2] = Prefs.haUrl().isEmpty() ? "—" : Prefs.haUrl();
+            v[v.length - 1] = Prefs.haToken().isEmpty() ? Ui.tr("Not set") : Ui.tr("Set");
             return v;
         }
 
@@ -1004,6 +1009,8 @@ public class SettingsActivity extends Activity {
                 return;
             }
             int row = pickScroll + focus;
+            int rows = settingLabels().length;
+            if (row == rows - 2 || row == rows - 1) return;   // the Home Assistant rows open a dialog on OK
             switch (row) {
                 case 0: break;   // OK opens the language picker.
                 case 1: {
@@ -1059,6 +1066,31 @@ public class SettingsActivity extends Activity {
                 return true;
             });
             dialog.show();
+        }
+
+        /** The Home Assistant server or its token, typed on the TV (they win over config.properties). */
+        private void askHomeAssistant(boolean url) {
+            EditText field = new EditText(activity);
+            field.setSingleLine(true);
+            field.setText(url ? Prefs.haUrl() : "");
+            field.setHint(url ? Ui.tr("https://ha.example.com") : Ui.tr("Paste a long-lived access token"));
+            if (!url) {
+                // So it isn't read over someone's shoulder; the row only says whether one is saved.
+                field.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                        | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+            }
+            new AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle(url ? Ui.tr("Home Assistant") : Ui.tr("Home Assistant token"))
+                    .setView(field)
+                    .setPositiveButton(Ui.tr("Save"), (d, which) -> {
+                        String v = field.getText().toString().trim();
+                        if (url) Prefs.setHaUrl(v);
+                        else Prefs.setHaToken(v);
+                        invalidate();
+                        spoken.focusMoved();
+                    })
+                    .setNegativeButton(Ui.tr("Cancel"), null)
+                    .show();
         }
 
         // MARK: - My Photos (sent from a computer: tools/photos.py)
@@ -1363,6 +1395,12 @@ public class SettingsActivity extends Activity {
                 openPicker(PICK_LANGUAGE);
             } else if (screen == HOME_SETTINGS && pickScroll + focus == CITY_ROW) {
                 askCity();
+                return;
+            } else if (screen == HOME_SETTINGS && pickScroll + focus == settingLabels().length - 2) {
+                askHomeAssistant(true);
+                return;
+            } else if (screen == HOME_SETTINGS && pickScroll + focus == settingLabels().length - 1) {
+                askHomeAssistant(false);
                 return;
             } else if (screen == HOME_SETTINGS && pickScroll + focus == PHOTOS_ROW) {
                 askRemovePhotos();
