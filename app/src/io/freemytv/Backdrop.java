@@ -26,8 +26,9 @@ final class Backdrop {
     /** The UI's size against 1920×1080 (at most 1): nothing is built bigger than the screen can show. */
     private static final float UI_SCALE = uiScale();
     static final int W = ui(1920), H = ui(1080), FW = 192, FH = 108, GW = 480, GH = 270;
-    /** The cards at their focused size (1.05×): the wide one and the two tall ones. */
-    static final int WIDE_W = ui(1092), WIDE_H = ui(464), TALL_W = ui(336), TALL_H = ui(464);
+    /** The cards at their focused size (1.05× of HomeView's 1040 × 296 and 320 × 296): theirs is the shape a card
+     * has, so a poster of another ratio is cropped to it once, here, instead of at every frame. */
+    static final int WIDE_W = ui(1092), WIDE_H = ui(311), TALL_W = ui(336), TALL_H = ui(311);
 
     private static float uiScale() {
         android.util.DisplayMetrics m = android.content.res.Resources.getSystem().getDisplayMetrics();
