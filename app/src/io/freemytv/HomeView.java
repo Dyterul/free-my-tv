@@ -49,13 +49,13 @@ import java.util.function.Consumer;
  *    buttons (Live TV, HDMI Inputs, Settings), with the focused one's name below it, and the small crypto quotes
  *    (logo + price) at the right end of the tab row; in the middle of that row, the time and today's date, always on
  *    screen (the header), whether the picks are loaded or not;
- *  - three cards with the titles recommended for right now in the selected tab (Recs, from TMDB), cover-cropped so no
+ *  - four cards with the titles recommended for right now in the selected tab (Recs, from TMDB), cover-cropped so no
  *    photo is ever stretched; the focused card's own photo is the background, heavily blurred and almost white
  *    (Backdrop), cross-faded as the focus moves, and the neutral gradient comes back when no card has the focus;
  *    without picks, one of your own photos (Photos) the same way, or else the gradient;
  *  - at the bottom, the split screen: two rows of apps on the left (icons in each brand's color, like the tvOS Dock;
- *    the focused one grows) and the Home Assistant panel on the right (the TV light mode, the lights, the brightness
- *    and two scenes), in the same glass and exactly as tall;
+ *    the focused one grows) and the Home Assistant panel on the right (the lights and the brightness, the three scenes
+ *    and the TV light mode's segments), in the same glass and exactly as tall;
  *  - ↓ on the shelf: everything moves up and the bottom drawer appears (inputs, shortcuts, weather for the next hours or days
  *    and quotes with the 24 h change); the background lightens (darkens at night). ↑ or Back closes it;
  *  - from sunset to sunrise, a night look: dark background, smoked glass and white text.
@@ -95,12 +95,15 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             HA = 8;
     private static final int Z_STATUS = 0, Z_HERO = 1, Z_SHELF = 2, Z_DRAWER = 3;
     private static final ExecutorService LOADER = Executors.newSingleThreadExecutor();
-    // Light design (the L_ constants): title, tab bar, three recommendation cards and the shelf.
-    // The tab bar is a 68 px capsule; the cards sit on the 5-column grid (the wide one spans 3).
-    private static final float L_TITLE_BASE = 130, L_TABBAR_TOP = 158, L_TABBAR_H = 68, L_CARDS_TOP = 262, L_CARD_H = 296;
-    private static final float L_TALL_W = 320, L_CARD_GAP = 40, L_BUTTON = 68, L_BUTTON_GAP = 20, L_BUTTON_CY = 103;
-    // The header: the clock and the date, permanent, in a glass capsule in the row of the round buttons.
-    private static final float L_HEADER_PAD = 30, L_HEADER_GAP = 22;
+    // Light design (the L_ constants): title, tab bar, four recommendation cards and the shelf.
+    // The tab bar is a 68 px capsule; the cards share the content's width in four equal columns (16:9 each).
+    private static final float L_TITLE_BASE = 130, L_TABBAR_TOP = 158, L_TABBAR_H = 68, L_CARDS_TOP = 262, L_CARD_H = 231;
+    private static final float L_CARD_GAP = 40, L_BUTTON = 68, L_BUTTON_GAP = 20, L_BUTTON_CY = 103;
+    /** The picks: four cards side by side, all the same width (the content's 1760 px less three gaps, over four). */
+    private static final int CARDS = 4;
+    // The header: the clock and the date, permanent, in the screensaver's Liquid Glass, compact, in the row of the
+    // round buttons.
+    private static final float L_HEADER_PAD = 26, L_HEADER_GAP = 18;
     private static final float L_DATE_BASE = 330, L_CLOCK_BASE = 540, L_WEATHER_BASE = 626, L_QUOTES_BASE = 694;
     private static final int L_INK = 0xFF1D1D1F, L_DIM = 0xFF6E6E73, L_FAINT = 0xFF8E8E93;
     // Below the pick cards the screen splits in two: the apps shelf on the left, the Home Assistant panel on the
@@ -109,15 +112,17 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     /** The shelf: two rows of four apps; more than that scrolls a page at a time with the focus. */
     private static final int SHELF_COLS = 4, SHELF_ROWS = 2, SHELF_PAGE = SHELF_COLS * SHELF_ROWS;
     private static final float HA_L = 1010, HA_R = CONTENT_R, HA_TOP = 668, HA_BOT = 980;
-    // The panel: its name and whether Home Assistant answers, then three rows: the TV light mode's three segments,
-    // the lights and the brightness, and the two scenes (which share the row).
-    private static final float HA_PAD = 18, HA_HEAD = 26, HA_CELL_R = 14, HA_SEG_RADIUS = 11;
+    // The panel, without a heading: the lights and the brightness, the three scenes, and the TV light mode's
+    // segments across the bottom.
+    private static final float HA_PAD = 18, HA_CELL_R = 14, HA_SEG_RADIUS = 11;
     /** The panes' corner radius: the shelf's (TILE_RADIUS + SHELF_PAD), so both halves of the split look alike. */
     private static final float HA_RADIUS = TILE_RADIUS + SHELF_PAD;
     private static final int HA_ROWS = 3, HA_COUNT = 8, HA_SEGMENTS = 3;
     /** How many items each row of the panel holds: {first item, how many}. */
-    private static final int[][] HA_ROW = {{0, 3}, {3, 3}, {6, 2}};
-    private static final int HA_LIGHTS = 3, HA_MASTER = 4, HA_BRIGHTNESS = 5, HA_COZY = 6, HA_DAYLIGHT = 7;
+    private static final int[][] HA_ROW = {{0, 2}, {2, 3}, {5, 3}};
+    /** The TV light mode's first segment: the panel's bottom row, all three across. */
+    private static final int HA_MODES = 5;
+    private static final int HA_LIGHTS = 0, HA_BRIGHTNESS = 1, HA_COZY = 2, HA_DAYLIGHT = 3, HA_READING = 4;
     private static String[] tabs;
     private static int tabsGeneration = -1;
     private static final String[] TAB_KIND = {null, "movie", "tv"};
@@ -157,24 +162,24 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private boolean nightPair;          // the glass holds both photos (day and night), blended by `night`
     private Shader nightGradient;
 
-    // At the top: tabs (0 to 2) and icon-only buttons (3 to 5); the three cards
+    // At the top: tabs (0 to 2) and icon-only buttons (3 to 5); the four cards
     private int tab, topIndex, cardIndex;
     private int widgetIndex;    // with TalkBack on, the drawer's weather (0) or quotes (1) card can take the focus
     private List<Recs.Pick> cards = new ArrayList<>();
     // The three tabs, then the round buttons at the top right (up to HomeApps.MAX_TOP).
     private final Spring[] topFocus = new Spring[3 + HomeApps.MAX_TOP];
     private final RectF[] topRects = new RectF[3 + HomeApps.MAX_TOP];
-    private final Spring[] cardFocus = new Spring[3];
-    private final RectF[] cardRects = new RectF[3];
+    private final Spring[] cardFocus = new Spring[CARDS];
+    private final RectF[] cardRects = new RectF[CARDS];
 
-    // Home Assistant panel (right of the shelf): its own glass, six cards and their focus.
+    // Home Assistant panel (right of the shelf): its own glass, its cards and their focus.
     private final HomeAssistant ha = new HomeAssistant();
     private final RectF haRect = new RectF();
     private final RectF[] haRects = new RectF[HA_COUNT];
     private final Spring[] haFocus = new Spring[HA_COUNT];
     private int haIndex;
     private boolean haDirty;
-    private Paint haTitle, haHint, haLabel, haValue;
+    private Paint haLabel, haValue;
     private final Paint haFill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final HomeAssistant.Listener haListener = new HomeAssistant.Listener() {
         @Override public void onState() {
@@ -403,7 +408,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             checkNotices();
             updatePalette();
             checkNight(true);
-            updatePicks();      // three new ones every hour
+            updatePicks();      // four new ones every hour
             updateSleep();
             handler.postDelayed(this, 15_000);
         }
@@ -451,7 +456,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             topFocus[i] = new Spring(0.26f, 0.85f, 0);
             topRects[i] = new RectF();
         }
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < CARDS; i++) {
             cardFocus[i] = new Spring(0.32f, 0.78f, 0);
             cardRects[i] = new RectF();
         }
@@ -701,13 +706,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lClock.setLetterSpacing(-0.01f);
         lWeather = Ui.text(Ui.medium, 34 * k, L_DIM);
         lClockQuote = Ui.numbers(Ui.medium, 28 * k, L_DIM);
-        lHeader = Ui.numbers(Ui.semibold, 42 * k, L_INK);
+        lHeader = Ui.numbers(Ui.semibold, 34 * k, L_INK);
         lHeader.setLetterSpacing(-0.01f);
-        lHeaderDate = Ui.text(Ui.medium, 23 * k, L_DIM);
-        haTitle = Ui.text(Ui.semibold, 21 * k, L_DIM);
-        haTitle.setLetterSpacing(0.06f);
-        haHint = Ui.text(Ui.medium, 19 * k, L_FAINT);
-        haHint.setTextAlign(Paint.Align.RIGHT);
+        lHeaderDate = Ui.text(Ui.medium, 21 * k, L_DIM);
         haLabel = Ui.text(Ui.semibold, 22 * k, L_INK);
         haValue = Ui.numbers(Ui.medium, 21 * k, L_DIM);
         haValue.setTextAlign(Paint.Align.RIGHT);
@@ -2781,7 +2782,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             return;
         }
         for (int i = picksOn() ? 0 : 3; i < 3 + lightButtons.size(); i++) out.add(a11yId(Z_TOP, i));
-        for (int i = 0; i < Math.min(3, cards.size()); i++) out.add(a11yId(Z_CARDS, i));
+        for (int i = 0; i < Math.min(CARDS, cards.size()); i++) out.add(a11yId(Z_CARDS, i));
         for (int i = shelfFirst; i < Math.min(shelf.size(), shelfFirst + shelfVisible); i++) out.add(a11yId(Z_SHELF, i));
         for (int i = 0; i < HA_COUNT; i++) out.add(a11yId(Z_HA, i));
         for (int i = 0; i < drawerItems.size(); i++) out.add(a11yId(Z_DRAWER, i));
@@ -2835,7 +2836,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 dy = (i < 3 ? heroLayer : status).getTranslationY();
                 break;
             case Z_CARDS:
-                if (i >= Math.min(3, cards.size())) return false;
+                if (i >= Math.min(CARDS, cards.size())) return false;
                 a11yRect.set(cardRects[i]);
                 dy = heroLayer.getTranslationY();
                 break;
@@ -3027,11 +3028,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             topRects[3 + i].set(right - b, cy - b / 2, right, cy + b / 2);
             right -= b + L_BUTTON_GAP * k;
         }
-        float top = L_CARDS_TOP * k, ch = L_CARD_H * k, g = L_CARD_GAP * k, left = MARGIN * k, tall = L_TALL_W * k;
-        float wide = (CONTENT_R - MARGIN) * k - 2 * tall - 2 * g;
-        cardRects[0].set(left, top, left + wide, top + ch);
-        cardRects[1].set(cardRects[0].right + g, top, cardRects[0].right + g + tall, top + ch);
-        cardRects[2].set(cardRects[1].right + g, top, cardRects[1].right + g + tall, top + ch);
+        float top = L_CARDS_TOP * k, ch = L_CARD_H * k, g = L_CARD_GAP * k, left = MARGIN * k;
+        float bw = ((CONTENT_R - MARGIN) * k - (CARDS - 1) * g) / CARDS;
+        for (int i = 0; i < CARDS; i++) {
+            float cx = left + i * (bw + g);
+            cardRects[i].set(cx, top, cx + bw, top + ch);
+        }
         for (RectF r : cardRects) snap(r);
         for (HomeApps.Item it : lightButtons) {
             Symbols.warm(getContext(), it.symbol, 27 * k);
@@ -3041,7 +3043,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         heroDirty = statusDirty = true;
     }
 
-    /** The three cards of the current tab (Explore, Movies, Shows); the background follows the focused one. */
+    /** The four cards of the current tab (Explore, Movies, Shows); the background follows the focused one. */
     private void updateCards() {
         List<Recs.Pick> list = recs.now(TAB_KIND[tab]);
         if (!samePicks(list, cards)) {
@@ -3160,8 +3162,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             c.drawText(tabs()[i], r.centerX() - p.measureText(tabs()[i]) / 2, r.centerY() + Ui.halfCap(p), p);
         }
         int top = -1;
-        for (int i = 0; i < 3; i++) if (cardFocus[i].value > 0.02f && (top < 0 || cardFocus[i].value > cardFocus[top].value)) top = i;
-        for (int i = 0; i < 3; i++) if (i != top) drawLightCard(c, i);
+        for (int i = 0; i < CARDS; i++) if (cardFocus[i].value > 0.02f && (top < 0 || cardFocus[i].value > cardFocus[top].value)) top = i;
+        for (int i = 0; i < CARDS; i++) if (i != top) drawLightCard(c, i);
         if (top >= 0) drawLightCard(c, top);
         if (HomeData.coinCount() > 0 || playingTab != null) drawQuotes(c);
     }
@@ -3191,8 +3193,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     /**
-     * The header: the time and today's date in a glass capsule in the middle of the top row, beside the round buttons.
-     * It stays there while the picks load and change: it is the home screen's clock, not the hero's.
+     * The header: the time and today's date in the screensaver's Liquid Glass, compact — the background shows through,
+     * the rim catches the light and a soft halo sets the capsule off — in the middle of the top row. It stays there
+     * while the picks load and change: it is the home screen's clock, not the hero's.
      */
     private void drawHeaderClock(Canvas c) {
         if (lHeader == null || clockText.isEmpty()) return;
@@ -3201,12 +3204,24 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         float pw = 2 * L_HEADER_PAD * k + tw + L_HEADER_GAP * k + dw;
         float left = Math.round(w / 2f - pw / 2);
         headerRect.set(left, Math.round(cy - cap / 2), left + Math.round(pw), Math.round(cy + cap / 2));
+        // The halo, as the screensaver's glass stands out from the photo behind it.
+        tmp.set(headerRect);
+        tmp.inset(-2 * k, -2 * k);
+        shadow.setColor(Ui.alpha(0xFFFFFFFF, tone(0.45f, 0.28f)));
+        shadows.draw(c, tmp, cap / 2, SHADOW_BLUR * k, shadow);
         tmp.set(headerRect);
         tmp.offset(0, 6 * k);
         shadow.setColor(Ui.alpha(0xFF000000, tone(0.1f, 0.3f)));
         shadows.draw(c, tmp, cap / 2, SHADOW_BLUR * k, shadow);
-        scene.liquid(c, headerRect, cap / 2, tone(0xFFFFFFFF, SMOKE), tone(0.5f, 0.45f), tone(0.02f, 0.01f),
-                12 * k, 8 * k, tone(0.55f, 0.4f), 1);
+        scene.liquid(c, headerRect, cap / 2, tone(0xFFFFFFFF, SMOKE), tone(0.34f, 0.3f), tone(0.04f, 0.12f),
+                16 * k, 10 * k, tone(0.95f, 0.85f), 1);
+        // The bright edge along the top, as the glass rim on the screensaver.
+        rim.setShader(new LinearGradient(0, headerRect.top, 0, headerRect.bottom, 0xCCFFFFFF, 0x00FFFFFF,
+                Shader.TileMode.CLAMP));
+        rim.setStrokeWidth(1.5f * k);
+        c.drawRoundRect(headerRect, cap / 2, cap / 2, rim);
+        rim.setShader(null);
+        rim.setStrokeWidth(2.5f * k);
         c.drawText(clockText, headerRect.left + L_HEADER_PAD * k, headerRect.centerY() + Ui.halfCap(lHeader), lHeader);
         c.drawText(dateText, headerRect.left + L_HEADER_PAD * k + tw + L_HEADER_GAP * k,
                 headerRect.centerY() + Ui.halfCap(lHeaderDate), lHeaderDate);
@@ -3234,9 +3249,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         shadows.draw(c, tmp, r0, DEEP_BLUR * k, shadowDeep);
         c.restore();
         Backdrop b = p == null ? null : recs.backdrop(p);
-        Bitmap img = b == null ? null : (i == 0 ? b.wide : b.tall);
+        Bitmap img = b == null ? null : b.card;
         if (img != null) {
-            roundImage(c, img, i == 0 ? b.wideShader : b.tallShader, cell, r);
+            roundImage(c, img, b.cardShader, cell, r);
         } else {
             fill.setShader(null);
             fill.setColor(tone(0xFFDADADF, 0xFF2C2C2E));
@@ -3484,19 +3499,19 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // MARK: - Home Assistant panel: the right column of the split screen
 
     /**
-     * The panel: three rows under its name — the TV light mode's segments (touching, one control), the lights with
-     * the brightness, and the two scenes (which share their row) — in the same glass as the shelf beside it.
+     * The panel: three rows without a heading — the lights and the brightness, the three scenes, and the TV light
+     * mode's segments (touching: one control) — in the same glass as the shelf beside it.
      */
     private void layoutHa() {
-        if (haTitle == null) return;
+        if (haLabel == null) return;
         haRect.set(Math.round(HA_L * k), Math.round(HA_TOP * k), Math.round(HA_R * k), Math.round(HA_BOT * k));
         float pad = HA_PAD * k, gap = 14 * k;
         float left = haRect.left + pad, right = haRect.right - pad;
-        float top = haRect.top + pad + HA_HEAD * k + 4 * k, bottom = haRect.bottom - pad;
+        float top = haRect.top + pad, bottom = haRect.bottom - pad;
         float rh = (bottom - top - (HA_ROWS - 1) * gap) / HA_ROWS;
         for (int row = 0; row < HA_ROWS; row++) {
             int start = HA_ROW[row][0], count = HA_ROW[row][1];
-            float g = row == 0 ? 0 : gap;   // the three segments touch: one control, not three buttons
+            float g = start == HA_MODES ? 0 : gap;   // the three segments touch: one control, not three buttons
             float bw = (right - left - (count - 1) * g) / count;
             for (int c = 0; c < count; c++) {
                 float x = left + c * (bw + g), y = top + row * (rh + gap);
@@ -3511,7 +3526,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         haDirty = true;
     }
 
-    /** The panel's row and column of an item (its rows hold three, three and two items). */
+    /** The panel's row and column of an item (its rows hold two, three and three items). */
     private static int haRow(int index) {
         for (int row = 1; row < HA_ROWS; row++) if (index < HA_ROW[row][0]) return row - 1;
         return HA_ROWS - 1;
@@ -3531,61 +3546,36 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             case HA_BRIGHTNESS: return "sunny";
             case HA_COZY: return "sunset";
             case HA_DAYLIGHT: return "sunrise";
-            default: return null;   // the two light switches draw the bulb, the segments carry their own text
+            default: return null;   // the light switch and Reading Light draw the bulb; the segments carry text
         }
     }
 
     private static String haName(int i) {
         switch (i) {
             case HA_LIGHTS: return Ui.tr("Lights On/Off");
-            case HA_MASTER: return Ui.tr("All Lights");
             case HA_BRIGHTNESS: return Ui.tr("Brightness");
             case HA_COZY: return "Cozy Orange";
             case HA_DAYLIGHT: return Ui.tr("Daylight");
-            default: return HomeAssistant.MODES[i];   // the TV light mode's segments
+            case HA_READING: return "Leselicht";
+            default: return HomeAssistant.MODES[i - HA_MODES];   // the TV light mode's segments
         }
     }
 
     /** What the entity says: the lights that are on glow, the scenes never do. */
     private boolean haActive(int i) {
-        switch (i) {
-            case HA_LIGHTS: return ha.areaOn;
-            case HA_MASTER: return ha.masterOn;
-            default: return false;
-        }
+        return i == HA_LIGHTS && ha.areaOn;   // the scenes never glow
     }
 
-    /** The panel: its glass, its name, whether Home Assistant answers, and the six cards. */
+    /** The panel: its glass and the three rows (no heading: the cards say what they are). */
     private void drawHa(Canvas c) {
         // These paints aren't in applyTone: the night look sets them here.
-        haTitle.setColor(tone(L_DIM, 0xFF98989D));
-        haHint.setColor(tone(L_FAINT, 0x99FFFFFF));
         haLabel.setColor(tone(L_INK, WHITE));
         haValue.setColor(tone(L_DIM, 0xB0FFFFFF));
         // The section's glass, as the shelf's: white by day, smoked at night.
         scene.liquid(c, haRect, HA_RADIUS * k, tone(0xFFFFFFFF, SMOKE), tone(0.3f, 0.14f), tone(0.03f, 0.08f),
                 tone(26, 30) * k, tone(18, 24) * k, tone(0.6f, 0.9f), 1);
-        float base = haRect.top + HA_PAD * k + Ui.cap(haTitle);
-        c.drawText(Ui.tr("Home Assistant"), haRect.left + HA_PAD * k, base, haTitle);
-        // The connection's real state, from the socket itself: green online, red offline, grey without an address.
-        String note;
-        int dot;
-        if (!ha.ready()) {
-            note = Ui.tr("Not set up");
-            dot = tone(0xFF8E8E93, 0xB0FFFFFF);
-        } else if (ha.online) {
-            note = Ui.tr("Online");
-            dot = 0xFF30D158;
-        } else {
-            note = Ui.tr("Offline");
-            dot = 0xFFFF453A;
-        }
-        float right = haRect.right - HA_PAD * k;
-        c.drawText(note, right, base, haHint);
-        haFill.setColor(dot);
-        c.drawCircle(right - haHint.measureText(note) - 10 * k, base - Ui.halfCap(haHint), 4 * k, haFill);
+        for (int i = 0; i < HA_MODES; i++) drawHaCard(c, i);
         drawSegments(c);
-        for (int i = HA_SEGMENTS; i < HA_COUNT; i++) drawHaCard(c, i);
     }
 
     /**
@@ -3593,14 +3583,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
      * reports is filled in, and OK on a segment sets it with input_select.select_option.
      */
     private void drawSegments(Canvas c) {
-        if (haRects[0].isEmpty()) return;
-        tmp.set(haRects[0]);
-        tmp.union(haRects[HA_SEGMENTS - 1]);
+        if (haRects[HA_MODES].isEmpty()) return;
+        tmp.set(haRects[HA_MODES]);
+        tmp.union(haRects[HA_MODES + HA_SEGMENTS - 1]);
         scene.liquid(c, tmp, HA_SEG_RADIUS * k, tone(0xFFFFFFFF, SMOKE), tone(0.42f, 0.16f), tone(0.02f, 0.06f),
                 16 * k, 10 * k, tone(0.5f, 0.8f), 1);
         for (int i = 0; i < HA_SEGMENTS; i++) {
-            RectF r = haRects[i];
-            float f = Ui.clamp(haFocus[i].value);
+            RectF r = haRects[HA_MODES + i];
+            float f = Ui.clamp(haFocus[HA_MODES + i].value);
             boolean on = haModeOn(i);
             cell.set(r.left + (i == 0 ? 5 * k : 0), r.top + 5 * k,
                     r.right - (i == HA_SEGMENTS - 1 ? 5 * k : 0), r.bottom - 5 * k);
@@ -3720,26 +3710,25 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             return;
         }
         click.open();
-        if (haIndex < HA_SEGMENTS) {   // the TV light mode: input_select.select_option
-            ha.selectMode(HomeAssistant.MODES[haIndex]);
+        if (haIndex >= HA_MODES) {   // the TV light mode: input_select.select_option
+            ha.selectMode(HomeAssistant.MODES[haIndex - HA_MODES]);
             return;
         }
         switch (haIndex) {
             case HA_LIGHTS: ha.toggleArea(); break;
-            case HA_MASTER: ha.toggleMaster(); break;
             case HA_BRIGHTNESS: ha.setBrightness(ha.brightness < 0 ? 50 : ha.brightness); break;
             case HA_COZY: ha.scene(HomeAssistant.SCENE_COZY); break;
-            default: ha.scene(HomeAssistant.SCENE_DAYLIGHT); break;
+            case HA_DAYLIGHT: ha.scene(HomeAssistant.SCENE_DAYLIGHT); break;
+            default: ha.scene(HomeAssistant.SCENE_READING); break;
         }
     }
 
     /** A segment or a card as TalkBack reads it: its name, and what its entity says. */
     private String haText(int i) {
         String name = haName(i);
-        if (i < HA_SEGMENTS) return name + ", " + (haModeOn(i) ? Ui.tr("On") : Ui.tr("Off"));
+        if (i >= HA_MODES) return name + ", " + (haModeOn(i - HA_MODES) ? Ui.tr("On") : Ui.tr("Off"));
         switch (i) {
             case HA_LIGHTS: return name + ", " + (ha.areaOn ? Ui.tr("On") : Ui.tr("Off"));
-            case HA_MASTER: return name + ", " + (ha.masterOn ? Ui.tr("On") : Ui.tr("Off"));
             case HA_BRIGHTNESS: return ha.brightness < 0 ? name : name + ", " + ha.brightness + "%";
             default: return name;
         }

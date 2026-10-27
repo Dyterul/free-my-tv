@@ -36,7 +36,9 @@ import java.util.concurrent.Executors;
  *    never upscales it;
  *  - top right, like the iPhone lock screen: the date with the weather, the big Liquid Glass clock (the photo shows
  *    through the digits, bent at the edges; Shaders.GLASS_TEXT) and the compact prices;
- *  - bottom left, the photo's caption: the time-of-day label ("TONIGHT"), the title, and genre · runtime · service.
+ *  - bottom left, the photo's caption: the time-of-day label ("TONIGHT"), the title, and genre · runtime · service;
+ *  - top left, while a music app (Spotify) plays: the cover and the song in a small glass card, which fades in with
+ *    the music and out when it stops;
  * Dark scrims only where there is text, stronger where the photo is bright. Any key exits (as on Apple TV); with Watch
  * from the screensaver on (Prefs.saverWatch), OK first opens the title in its app, and the caption says so.
  * With your own photos on (Photos), those instead, without a caption.
@@ -107,6 +109,14 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
     private final TextPaint fit = new TextPaint();
     private String playingCorner, playingBottom;
     private float playingCornerWidth, playingBottomWidth, cornerCap, bottomCap, cornerBase;
+    // A music app's song: the cover and the title in a glass card top left (nothing while it's quiet).
+    private NowPlaying.Track trackFor;
+    private float trackAlpha, trackTarget;
+    private BitmapShader trackArtShader;
+    private String trackTitle = "", trackArtist = "";
+    private final RectF trackCard = new RectF(), trackArt = new RectF();
+    private Paint trackTitlePaint, trackArtistPaint, trackGlass, trackRim;
+    private long lastDraw;
     // The bars before what's playing move on every frame (drawn over the recorded text, which stays still).
     private final Paint barPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF barRect = new RectF();
@@ -158,6 +168,7 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
         data = HomeData.get(c);
         recs = Recs.get(c);
         playing = new NowPlaying.Watch(c, () -> {
+            fitTrack();
             fitPlaying();
             onData();
         });
@@ -271,6 +282,13 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
         for (Paint p : new Paint[] {cornerDate, cornerQuote, cornerStale, cornerClock, labelPaint, titlePaint, metaPaint, barPaint}) {
             p.setShadowLayer(18 * k, 0, 2 * k, 0x66000000);
         }
+        trackTitlePaint = Ui.text(Ui.semibold, 25 * k, 0xFFFFFFFF);
+        trackArtistPaint = Ui.text(Ui.medium, 21 * k, 0xC7FFFFFF);
+        trackGlass = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        trackRim = new Paint(Paint.ANTI_ALIAS_FLAG);
+        trackRim.setStyle(Paint.Style.STROKE);
+        trackFor = null;   // measured again for the new size
+        fitTrack();
         fitPlaying();
         glassFor = "";
         dirty = true;
@@ -457,7 +475,10 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
             if (fallback) drawFallback(canvas, up, current == null ? 1 : 1 - first);
             else canvas.drawRect(0, 0, w, h, black);
         }
-        if (current == null) return;
+        if (current == null) {
+            drawTrack(canvas, up);
+            return;
+        }
         if (fallback && first >= 1) fallback = false;
 
         place(current, up, placeA);
@@ -477,12 +498,14 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
         }
         drawGlass(canvas, first, e);
         drawCaptions(canvas, up);
+        drawTrack(canvas, up);
     }
 
     /** What an app is playing, cut to fit the corner and the bottom line: once per title, not while recording. */
     private void fitPlaying() {
         String now = playing.text;
-        if (now == null || quotePaint == null) {
+        // With the cover on screen (Spotify), the card says it all: the corner's and the bottom line step aside.
+        if (now == null || quotePaint == null || trackFor != null) {
             playingCorner = playingBottom = null;
             return;
         }
@@ -500,6 +523,85 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
     private void drawBars(Canvas c, float x, float base, float cap, int color, float alpha) {
         barPaint.setColor(Ui.alpha(color, alpha));
         NowPlaying.drawBars(c, x, base, cap, barPaint, true, barRect);
+    }
+
+    /**
+     * Measures the song card for what plays now (once per song, never while drawing): the app's name when it gives no
+     * title, the cover scaled into a rounded square.
+     */
+    private void fitTrack() {
+        NowPlaying.Track t = playing.track;
+        if (trackTitlePaint == null) return;
+        if (t == null) {
+            trackTarget = 0;   // the card fades out (drawTrack); the next song measures itself
+            return;
+        }
+        if (t == trackFor) {
+            trackTarget = 1;
+            return;
+        }
+        String title = t.title.isEmpty() ? t.app : t.title;
+        if (title.isEmpty() || t.art == null) {
+            trackFor = null;   // no cover (a radio stream, a video): the corner's text line stays
+            trackTarget = 0;
+            return;
+        }
+        trackFor = t;
+        fit.set(trackTitlePaint);
+        trackTitle = TextUtils.ellipsize(title, fit, 300 * k, TextUtils.TruncateAt.END).toString();
+        fit.set(trackArtistPaint);
+        trackArtist = TextUtils.ellipsize(t.artist, fit, 300 * k, TextUtils.TruncateAt.END).toString();
+        float pad = 14 * k, side = 66 * k, gap = 16 * k;
+        float tw = Math.max(trackTitlePaint.measureText(trackTitle), trackArtistPaint.measureText(trackArtist));
+        float left = MARGIN * k, top = DATE_BASE * k - 16 * k;
+        trackCard.set(left, top, left + pad + side + gap + tw + pad, top + side + 2 * pad);
+        trackArt.set(left + pad, top + pad, left + pad + side, top + pad + side);
+        trackArtShader = new BitmapShader(t.art, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+        float s = Math.max(side / t.art.getWidth(), side / t.art.getHeight());
+        matrix.setScale(s, s);
+        matrix.postTranslate(trackArt.left - (t.art.getWidth() * s - side) / 2,
+                trackArt.top - (t.art.getHeight() * s - side) / 2);
+        trackArtShader.setLocalMatrix(matrix);
+        trackTarget = 1;
+    }
+
+    /**
+     * The song card, top left: the cover in a rounded square, the title and the artist beside it, in a dark, thin
+     * glass with a bright rim. It fades in when the music starts and out when it stops.
+     */
+    private void drawTrack(Canvas c, long up) {
+        long dt = lastDraw == 0 ? 16 : Math.min(120, up - lastDraw);
+        lastDraw = up;
+        trackAlpha += (trackTarget - trackAlpha) * Math.min(1f, dt / 260f);
+        if (trackAlpha < 0.004f) {
+            trackAlpha = 0;
+            if (trackTarget == 0) trackFor = null;   // gone; the next song measures itself again
+            return;
+        }
+        if (trackFor == null) return;
+        float a = trackAlpha, r = 18 * k;
+        trackGlass.setShader(null);
+        trackGlass.setColor(Ui.alpha(0xFF000000, 0.34f * a));
+        c.drawRoundRect(trackCard, r, r, trackGlass);
+        trackGlass.setColor(Ui.alpha(0xFFFFFFFF, 0.12f * a));
+        c.drawRoundRect(trackCard, r, r, trackGlass);
+        trackRim.setColor(Ui.alpha(0xFFFFFFFF, 0.4f * a));
+        trackRim.setStrokeWidth(1.2f * k);
+        c.drawRoundRect(trackCard, r, r, trackRim);
+        trackGlass.setShader(trackArtShader);
+        trackGlass.setAlpha(Math.round(255 * a));
+        c.drawRoundRect(trackArt, 10 * k, 10 * k, trackGlass);
+        trackGlass.setShader(null);
+        trackGlass.setAlpha(255);
+        float tx = trackArt.right + 16 * k;
+        trackTitlePaint.setAlpha(Math.round(255 * a));
+        trackArtistPaint.setAlpha(Math.round(255 * a));
+        c.drawText(trackTitle, tx, trackCard.centerY() - 3 * k, trackTitlePaint);
+        if (!trackArtist.isEmpty()) {
+            c.drawText(trackArtist, tx, trackCard.centerY() + Ui.cap(trackArtistPaint) + 8 * k, trackArtistPaint);
+        }
+        trackTitlePaint.setAlpha(255);
+        trackArtistPaint.setAlpha(255);
     }
 
     private static float fadeIn(long elapsed, long duration) {

@@ -3,6 +3,7 @@ package io.freemytv;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.RectF;
@@ -21,7 +22,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 
 /**
  * What any app is playing (title, artist or channel, the app), from the media session each app publishes for the remote's
@@ -50,6 +50,34 @@ public class NowPlaying extends NotificationListenerService {
             float bx = x + i * cap * 0.42f;
             r.set(bx, base - cap * level, bx + cap * 0.28f, base);
             c.drawRoundRect(r, cap * 0.14f, cap * 0.14f, p);
+        }
+    }
+
+    /** The song that plays: its title, its artist, the app, and its cover (null when the app has none). */
+    static final class Track {
+        final String title, artist, app;
+        final Bitmap art;
+
+        Track(String title, String artist, String app, Bitmap art) {
+            this.title = title;
+            this.artist = artist;
+            this.app = app;
+            this.art = art;
+        }
+
+        /** "Title · Artist · App", the line the home screen shows. */
+        String text() {
+            StringBuilder s = new StringBuilder(title);
+            if (!artist.isEmpty()) s.append(s.length() == 0 ? "" : " · ").append(artist);
+            if (!app.isEmpty() && !app.equals(title) && !app.equals(artist)) {
+                s.append(s.length() == 0 ? "" : " · ").append(app);
+            }
+            return s.length() == 0 ? null : s.toString();
+        }
+
+        /** The same song (the cover object too: a new song may bring a new one). */
+        boolean sameAs(Track o) {
+            return o != null && title.equals(o.title) && artist.equals(o.artist) && app.equals(o.app) && art == o.art;
         }
     }
 
@@ -83,6 +111,9 @@ public class NowPlaying extends NotificationListenerService {
         };
         private boolean on;
         volatile String text;
+        /** What plays now: the song's title, artist, app and cover (null for a video or a stream). */
+        volatile Track track;
+
 
         Watch(Context c, Runnable changed) {
             context = c;
@@ -126,7 +157,7 @@ public class NowPlaying extends NotificationListenerService {
         }
 
         private void update() {
-            String now = null;
+            Track now = null;
             for (MediaController mc : controllers) {   // most recent first
                 PlaybackState s = mc.getPlaybackState();
                 int state = s == null ? PlaybackState.STATE_NONE : s.getState();
@@ -137,18 +168,18 @@ public class NowPlaying extends NotificationListenerService {
                     break;
                 }
             }
-            if (Objects.equals(now, text)) return;
-            text = now;
+            if (now == null ? track == null : now.sameAs(track)) return;
+            track = now;
+            text = now == null ? null : now.text();
             changed.run();
         }
 
-        /** "Title · Artist · App": the parts the app gives, then its name; null when there's none of them. */
-        private String describe(MediaController mc) {
-            List<String> parts = new ArrayList<>();
+        /** The title, the artist, the app and the cover (music); null when the app says nothing at all. */
+        private Track describe(MediaController mc) {
             MediaMetadata m = mc.getMetadata();
             MediaDescription d = m == null ? null : m.getDescription();
-            if (d != null && !TextUtils.isEmpty(d.getTitle())) parts.add(d.getTitle().toString().trim());
-            if (d != null && !TextUtils.isEmpty(d.getSubtitle())) parts.add(d.getSubtitle().toString().trim());
+            String title = d == null || TextUtils.isEmpty(d.getTitle()) ? "" : d.getTitle().toString().trim();
+            String artist = d == null || TextUtils.isEmpty(d.getSubtitle()) ? "" : d.getSubtitle().toString().trim();
             String app = labels.get(mc.getPackageName());
             if (app == null) {
                 try {
@@ -159,8 +190,10 @@ public class NowPlaying extends NotificationListenerService {
                 }
                 labels.put(mc.getPackageName(), app);
             }
-            if (!app.isEmpty() && !parts.contains(app)) parts.add(app);
-            return parts.isEmpty() ? null : TextUtils.join(" · ", parts);
+            if (title.isEmpty() && artist.isEmpty() && app.isEmpty()) return null;
+            Bitmap art = m == null ? null : m.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART);
+            if (art == null && m != null) art = m.getBitmap(MediaMetadata.METADATA_KEY_ART);
+            return new Track(title, artist, app, art);
         }
     }
 }

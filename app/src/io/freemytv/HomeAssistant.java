@@ -49,7 +49,7 @@ final class HomeAssistant {
     static final String AREA = "wohnzimmer";
     /** On while some light in the living room is on: the toggle's glow. */
     static final String AREA_LIGHT = "binary_sensor.wohnzimmer_licht_status";
-    /** All the living room's lights in one light. */
+    /** The living room's lights as one light: the slider reads its brightness. */
     static final String MASTER = "light.lichter_an_aus";
     /** The TV light mode, set by the panel's segmented control (input_select.select_option). */
     static final String TV_LIGHT = "input_select.tv_light_modus";
@@ -57,6 +57,7 @@ final class HomeAssistant {
     static final String[] MODES = {"Aus", "TV-AmbientLight", "DreamView"};
     static final String SCENE_COZY = "scene.cozy_orange";
     static final String SCENE_DAYLIGHT = "scene.wohnzimmer_tageslicht";
+    static final String SCENE_READING = "scene.leselicht";
     /** The slider's steps, in percent. */
     static final int STEP = 10;
 
@@ -84,7 +85,7 @@ final class HomeAssistant {
     private Thread thread;
 
     // What the panel draws (written from the socket thread, read from the UI thread).
-    volatile boolean areaOn, masterOn, online, asked;
+    volatile boolean areaOn, online, asked;
     /** input_select.tv_light_modus as Home Assistant last reported it ("" until it says). */
     volatile String mode = "";
     /** 0 to 100; -1 while neither Home Assistant nor the person has said which. */
@@ -94,11 +95,6 @@ final class HomeAssistant {
 
     static boolean configured() {
         return !Prefs.haUrl().isEmpty() && !Prefs.haToken().isEmpty();
-    }
-
-    /** configured(), as of the last connection attempt. */
-    boolean ready() {
-        return ready;
     }
 
     void start(Listener l) {
@@ -130,12 +126,6 @@ final class HomeAssistant {
         areaOn = !areaOn;     // shows at once; the subscription corrects it where Home Assistant disagrees
         stateChanged();
         call("light", "toggle", "{\"area_id\":\"" + AREA + "\"}");
-    }
-
-    void toggleMaster() {
-        masterOn = !masterOn;
-        stateChanged();
-        call("light", "toggle", "{\"entity_id\":\"" + MASTER + "\"}");
     }
 
     /** A segment of the TV light mode: input_select.select_option with that option. */
@@ -376,8 +366,7 @@ final class HomeAssistant {
         if (AREA_LIGHT.equals(entity)) {
             areaOn = "on".equals(state);
         } else if (MASTER.equals(entity)) {
-            masterOn = "on".equals(state);
-            if (hasBrightness) this.brightness = pct(brightness);
+            if (hasBrightness) this.brightness = pct(brightness);   // where the slider stands
         } else if (TV_LIGHT.equals(entity)) {
             mode = state == null ? "" : state;
         }
