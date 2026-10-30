@@ -78,6 +78,8 @@ final class Config {
     // The home screen's Home Assistant panel (right of the apps); on the TV, Home Settings can change both.
     static final String HA_URL = "$(prop ha_url 'https://ha.kokohome.de')";
     static final String HA_TOKEN = "$(prop ha_token '')";
+    // Household recommendations (watch.kokohome.de): titles from a shared API that knows who's present.
+    static final String KOKOHOME_URL = "$(prop kokohome_url 'https://watch.kokohome.de')";
     static final boolean DISABLE_ASSISTANT = $ASSIST;
     static final boolean SHOW_CRYPTO = $CRYPTO;
     static final boolean HIDE_ANIMATION = $ANIMATION;

@@ -164,8 +164,22 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // The three tabs, then the round buttons at the top right (up to HomeApps.MAX_TOP).
     private final Spring[] topFocus = new Spring[3 + HomeApps.MAX_TOP];
     private final RectF[] topRects = new RectF[3 + HomeApps.MAX_TOP];
-    private final Spring[] cardFocus = new Spring[3];
-    private final RectF[] cardRects = new RectF[3];
+    /** Up to 8 cards: 5 KokoRecs titles + 1 refresh button (or the original 3 from Recs). */
+    private static final int MAX_CARDS = 8;
+    private final Spring[] cardFocus = new Spring[MAX_CARDS];
+    private final RectF[] cardRects = new RectF[MAX_CARDS];
+    private int cardCount = 3;
+
+    // KokoRecs: household recommendations from watch.kokohome.de
+    private final KokoRecs kokoRecs;
+    private List<KokoRecs.Title> kokoCards = new ArrayList<>();
+    private List<KokoRecs.User> kokoUsers = new ArrayList<>();
+    private boolean kokoMode;
+    /** The "Load new recommendations" card at the end of the carousel. */
+    private boolean kokoRefreshCard;
+    private static final float AVATAR_SIZE = 46, AVATAR_GAP = -12;
+    private static final float KOKO_CARD_W = 200;
+    private Paint avatarInitial, matchPaint, providerPaint, reasonPaint;
 
     // Home Assistant panel (right of the shelf): its own glass, six cards and their focus.
     private final HomeAssistant ha = new HomeAssistant();
@@ -309,7 +323,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private final Paint veil = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint tileFill = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final RectF tmp = new RectF(), cell = new RectF(), screen = new RectF();
+    private final RectF tmp = new RectF(), cell = new RectF(), screen = new RectF(), posterSrc = new RectF();
+    private final android.graphics.Matrix posterMatrix = new android.graphics.Matrix();
     private final TextPaint fitPaint = new TextPaint();
     private final RectF gridCell = new RectF();
     private LinearGradient[] tileShaders = new LinearGradient[0];
@@ -375,6 +390,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
     }
 
+    private final KokoRecs.Listener kokoListener = () -> {
+        wake();
+        updateCards();
+        heroDirty = true;
+    };
+
     private final Runnable reloadSoon = this::reload;
     private static final long APPS_MAX_AGE_MS = 15 * 60_000;
     private final LauncherApps launcherApps;
@@ -400,6 +421,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             playing.start();   // the listener allowed after the screen showed (a no-op once watching)
             data.refreshIfStale();
             recs.refreshIfStale();
+            kokoRecs.refreshIfStale();
             checkNotices();
             updatePalette();
             checkNight(true);
@@ -451,7 +473,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             topFocus[i] = new Spring(0.26f, 0.85f, 0);
             topRects[i] = new RectF();
         }
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < MAX_CARDS; i++) {
             cardFocus[i] = new Spring(0.32f, 0.78f, 0);
             cardRects[i] = new RectF();
         }
@@ -459,6 +481,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             haFocus[i] = new Spring(0.3f, 0.8f, 0);
             haRects[i] = new RectF();
         }
+        kokoRecs = KokoRecs.get(a);
         setLightButtons(HomeApps.topButtons());
         recs.setLight(true);
         checkNight(false);
@@ -492,8 +515,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lastStep = 0;
         data.addListener(this);
         recs.addListener(this);
+        kokoRecs.addListener(kokoListener);
         data.refreshIfStale();
         recs.refreshIfStale();
+        kokoRecs.refreshIfStale();
         Photos.importInbox(getContext(), ownReady);   // photos a computer just sent
         if (tvInputs != null) tvInputs.registerCallback(inputCallback, handler);
         handler.postDelayed(tick, 15_000);
@@ -533,6 +558,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         ha.stop();
         data.removeListener(this);
         recs.removeListener(this);
+        kokoRecs.removeListener(kokoListener);
         if (tvInputs != null) tvInputs.unregisterCallback(inputCallback);
     }
 
@@ -754,6 +780,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         border.setStrokeWidth(2 * k);
         rim.setStyle(Paint.Style.STROKE);
         rim.setStrokeWidth(2.5f * k);
+        avatarInitial = Ui.text(Ui.semibold, 22 * k, 0xFFFFFFFF);
+        avatarInitial.setTextAlign(Paint.Align.CENTER);
+        matchPaint = Ui.text(Ui.semibold, 19 * k, 0xFF30D158);
+        providerPaint = Ui.text(Ui.medium, 19 * k, L_FAINT);
+        reasonPaint = Ui.text(Ui.medium, 19 * k, L_DIM);
         fitPlaying();
     }
 
@@ -2482,6 +2513,20 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             }
             it = lightButtons.get(topIndex - 3);
             r = topRects[topIndex];
+        } else if (zone == Z_CARDS && kokoMode) {
+            if (kokoRefreshCard && cardIndex == cardCount - 1) {
+                kokoRecs.fetch();
+                click.open();
+                return;
+            }
+            KokoRecs.Title t = cardIndex < kokoCards.size() ? kokoCards.get(cardIndex) : null;
+            if (t == null) return;
+            if (t.pkg != null) {
+                it = HomeApps.app(t.pkg, t.providers.length > 0 ? t.providers[0] : "", t.link);
+                r = cardRects[cardIndex];
+            } else {
+                return;
+            }
         } else if (zone == Z_CARDS) {
             Recs.Pick p = cardIndex < cards.size() ? cards.get(cardIndex) : null;
             if (p == null || p.pkg == null) return;
@@ -2781,7 +2826,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             return;
         }
         for (int i = picksOn() ? 0 : 3; i < 3 + lightButtons.size(); i++) out.add(a11yId(Z_TOP, i));
-        for (int i = 0; i < Math.min(3, cards.size()); i++) out.add(a11yId(Z_CARDS, i));
+        int cardBound = kokoMode ? cardCount : Math.min(3, cards.size());
+        for (int i = 0; i < cardBound; i++) out.add(a11yId(Z_CARDS, i));
         for (int i = shelfFirst; i < Math.min(shelf.size(), shelfFirst + shelfVisible); i++) out.add(a11yId(Z_SHELF, i));
         for (int i = 0; i < HA_COUNT; i++) out.add(a11yId(Z_HA, i));
         for (int i = 0; i < drawerItems.size(); i++) out.add(a11yId(Z_DRAWER, i));
@@ -2798,7 +2844,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             case Z_TOP:
                 if (i >= 3) return label(lightButtons, i - 3);
                 return Ui.trf("{name}, tab {i} of {n}", "name", tabs()[i], "i", i + 1, "n", 3);
-            case Z_CARDS: return i < cards.size() ? pickText(cards.get(i)) : "";
+            case Z_CARDS:
+                if (kokoMode) {
+                    if (kokoRefreshCard && i == cardCount - 1) return Ui.tr("New picks");
+                    KokoRecs.Title t = i < kokoCards.size() ? kokoCards.get(i) : null;
+                    return t != null ? t.title + (t.matchPercent > 0 ? ", " + t.matchPercent + "%" : "") : "";
+                }
+                return i < cards.size() ? pickText(cards.get(i)) : "";
             case Z_SHELF:
                 if (reordering && i == shelfIndex) {
                     return Ui.trf("Moving {app}, position {n} of {total}",
@@ -2835,7 +2887,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 dy = (i < 3 ? heroLayer : status).getTranslationY();
                 break;
             case Z_CARDS:
-                if (i >= Math.min(3, cards.size())) return false;
+                if (i >= (kokoMode ? cardCount : Math.min(3, cards.size()))) return false;
                 a11yRect.set(cardRects[i]);
                 dy = heroLayer.getTranslationY();
                 break;
@@ -2874,7 +2926,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (sheetOpen) return others.isEmpty() ? -1 : a11yId(GRID, gridIndex);
         switch (zone) {
             case Z_TOP: return a11yId(Z_TOP, topIndex);
-            case Z_CARDS: return cardIndex < cards.size() ? a11yId(Z_CARDS, cardIndex) : -1;
+            case Z_CARDS: return cardIndex < (kokoMode ? cardCount : cards.size()) ? a11yId(Z_CARDS, cardIndex) : -1;
             case Z_SHELF: return shelf.isEmpty() ? -1 : a11yId(Z_SHELF, shelfIndex);
             case Z_DRAWER: return drawerItems.isEmpty() ? -1 : a11yId(Z_DRAWER, drawerIndex);
             case Z_HA: return a11yId(Z_HA, haIndex);
@@ -2929,7 +2981,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 if (i < 3) selectTab(i);
                 break;
             case Z_CARDS:
-                if (i >= cards.size()) return;
+                if (i >= (kokoMode ? cardCount : cards.size())) return;
                 if (drawerOpen) closeDrawer();
                 cardIndex = i;
                 break;
@@ -3028,11 +3080,18 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             right -= b + L_BUTTON_GAP * k;
         }
         float top = L_CARDS_TOP * k, ch = L_CARD_H * k, g = L_CARD_GAP * k, left = MARGIN * k, tall = L_TALL_W * k;
-        float wide = (CONTENT_R - MARGIN) * k - 2 * tall - 2 * g;
-        cardRects[0].set(left, top, left + wide, top + ch);
-        cardRects[1].set(cardRects[0].right + g, top, cardRects[0].right + g + tall, top + ch);
-        cardRects[2].set(cardRects[1].right + g, top, cardRects[1].right + g + tall, top + ch);
-        for (RectF r : cardRects) snap(r);
+        if (kokoMode) {
+            float cw = KOKO_CARD_W * k;
+            for (int i = 0; i < cardCount; i++) {
+                cardRects[i].set(left + i * (cw + g), top, left + i * (cw + g) + cw, top + ch);
+            }
+        } else {
+            float wide = (CONTENT_R - MARGIN) * k - 2 * tall - 2 * g;
+            cardRects[0].set(left, top, left + wide, top + ch);
+            cardRects[1].set(cardRects[0].right + g, top, cardRects[0].right + g + tall, top + ch);
+            cardRects[2].set(cardRects[1].right + g, top, cardRects[1].right + g + tall, top + ch);
+        }
+        for (int i = 0; i < cardCount; i++) snap(cardRects[i]);
         for (HomeApps.Item it : lightButtons) {
             Symbols.warm(getContext(), it.symbol, 27 * k);
             Symbols.warm(getContext(), it.symbol, 27 * k * 1.1f);
@@ -3043,6 +3102,27 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** The three cards of the current tab (Explore, Movies, Shows); the background follows the focused one. */
     private void updateCards() {
+        if (KokoRecs.configured()) {
+            List<KokoRecs.Title> list = kokoRecs.forTab(tab);
+            kokoUsers = kokoRecs.users();
+            kokoMode = !list.isEmpty();
+            if (kokoMode) {
+                kokoCards = list;
+                kokoRefreshCard = true;
+                cardCount = Math.min(list.size() + 1, MAX_CARDS);
+                cardIndex = Math.min(cardIndex, cardCount - 1);
+            } else {
+                kokoCards = list;
+                kokoRefreshCard = false;
+                cardCount = 3;
+            }
+            layoutLight();
+            heroDirty = true;
+            spoken.focusMoved();
+            return;
+        }
+        kokoMode = false;
+        cardCount = 3;
         List<Recs.Pick> list = recs.now(TAB_KIND[tab]);
         if (!samePicks(list, cards)) {
             cards = list;
@@ -3066,7 +3146,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private void syncBackground() {
         if (drawerOpen || sheetOpen || drawer.value > 0.001f || sheet.value > 0.001f) return;
         Backdrop b;
-        if (!picksOn()) {
+        if (kokoMode) {
+            b = null;
+        } else if (!picksOn()) {
             b = Photos.on(getContext()) ? Photos.backdrop(getContext(), ownReady) : null;
         } else {
             b = zone == Z_CARDS && cardIndex < cards.size() ? recs.backdrop(cards.get(cardIndex)) : null;
@@ -3159,15 +3241,17 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             if (i == tab) lTabOn.setColor(blend(tone(L_INK, WHITE), L_INK, focus));   // always dark on the white pill
             c.drawText(tabs()[i], r.centerX() - p.measureText(tabs()[i]) / 2, r.centerY() + Ui.halfCap(p), p);
         }
+        if (kokoMode) drawAvatarBar(c);
         int top = -1;
-        for (int i = 0; i < 3; i++) if (cardFocus[i].value > 0.02f && (top < 0 || cardFocus[i].value > cardFocus[top].value)) top = i;
-        for (int i = 0; i < 3; i++) if (i != top) drawLightCard(c, i);
+        int n = kokoMode ? cardCount : 3;
+        for (int i = 0; i < n; i++) if (cardFocus[i].value > 0.02f && (top < 0 || cardFocus[i].value > cardFocus[top].value)) top = i;
+        for (int i = 0; i < n; i++) if (i != top) drawLightCard(c, i);
         if (top >= 0) drawLightCard(c, top);
         if (HomeData.coinCount() > 0 || playingTab != null) drawQuotes(c);
     }
 
     private boolean picksOn() {
-        return Recs.hasKey(getContext());
+        return kokoMode || Recs.hasKey(getContext());
     }
 
     private void drawClock(Canvas c) {
@@ -3218,6 +3302,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
      * card, genre · runtime · service).
      */
     private void drawLightCard(Canvas c, int i) {
+        if (kokoMode) { drawKokoCard(c, i); return; }
         RectF base = cardRects[i];
         Recs.Pick p = i < cards.size() ? cards.get(i) : null;
         float v = cardFocus[i].value, f = Ui.clamp(v), s = 1 + 0.05f * v;
@@ -3276,6 +3361,131 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (i == 0 && p.meta != null && !p.meta.isEmpty()) {
             fitPaint.set(lCardMeta);
             c.drawText(TextUtils.ellipsize(p.meta, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, base.bottom + 80 * k, lCardMeta);
+        }
+    }
+
+    /** Avatar bar: colored circles with initials for each household member, overlapping slightly. */
+    private void drawAvatarBar(Canvas c) {
+        float x = CONTENT_R * k - 10 * k, cy = L_TITLE_BASE * k - 14 * k;
+        float size = AVATAR_SIZE * k, gap = AVATAR_GAP * k;
+        float totalW = kokoUsers.size() * size + Math.max(0, kokoUsers.size() - 1) * gap;
+        x -= totalW;
+        for (int i = 0; i < kokoUsers.size(); i++) {
+            KokoRecs.User u = kokoUsers.get(i);
+            float cx2 = x + size / 2;
+            fill.setShader(null);
+            fill.setColor(u.active ? u.color : tone(0xFFAAAAAA, 0xFF555555));
+            fill.setAlpha(u.active ? 255 : 120);
+            c.drawCircle(cx2, cy, size / 2, fill);
+            fill.setAlpha(255);
+            if (u.name.length() > 0) {
+                String ini = u.name.substring(0, 1).toUpperCase(java.util.Locale.ROOT);
+                avatarInitial.setAlpha(u.active ? 255 : 150);
+                c.drawText(ini, cx2, cy + Ui.halfCap(avatarInitial), avatarInitial);
+            }
+            // ring around focused avatar when user is in the top zone near the bar
+            x += size + gap;
+        }
+    }
+
+    /** KokoRecs poster card: poster image, title, match%, provider name, reason. The last card is "refresh". */
+    private void drawKokoCard(Canvas c, int i) {
+        RectF base = cardRects[i];
+        boolean isRefresh = kokoRefreshCard && i == cardCount - 1;
+        KokoRecs.Title t = !isRefresh && i < kokoCards.size() ? kokoCards.get(i) : null;
+        float v = cardFocus[i].value, f = Ui.clamp(v), s = 1 + 0.05f * v;
+        float bw = base.width(), bh = base.height(), r0 = 18 * k;
+        float cx = base.centerX(), cy = base.centerY() - 6 * k * v;
+        cell.set(cx - bw * s / 2, cy - bh * s / 2, cx + bw * s / 2, cy + bh * s / 2);
+        // shadow
+        c.save();
+        c.translate(cx, cy);
+        c.scale(s, s);
+        tmp.set(-bw / 2, -bh / 2, bw / 2, bh / 2);
+        tmp.offset(0, (10 + 14 * f) * k);
+        shadowDeep.setColor(Ui.alpha(0xFF000000, tone(0.14f, 0.32f) + tone(0.2f, 0.28f) * f));
+        shadows.draw(c, tmp, r0, DEEP_BLUR * k, shadowDeep);
+        c.restore();
+        if (isRefresh) {
+            scene.liquid(c, cell, r0 * s, tone(0xFFFFFFFF, SMOKE), tone(0.5f, 0.45f), tone(0.02f, 0.01f),
+                    12 * k, 8 * k, tone(0.55f, 0.4f), 1 - f * 0.3f);
+            if (f > 0.01f) {
+                fill.setShader(null);
+                fill.setColor(Ui.alpha(0xFFFFFFFF, f * 0.3f));
+                c.drawRoundRect(cell, r0 * s, r0 * s, fill);
+            }
+            Symbols.draw(getContext(), c, "sync", cell.centerX(), cell.centerY() - 10 * k,
+                    36 * k * s, tone(L_INK, 0xDDFFFFFF));
+            fitPaint.set(lCardTitle);
+            String label = Ui.tr("New picks");
+            c.drawText(label, cell.centerX() - fitPaint.measureText(label) / 2, cell.centerY() + 30 * k, lCardTitle);
+            return;
+        }
+        // poster image or placeholder
+        if (t != null && t.posterShader != null) {
+            posterSrc.set(0, 0, t.poster.getWidth(), t.poster.getHeight());
+            posterMatrix.setRectToRect(posterSrc, cell, android.graphics.Matrix.ScaleToFit.FILL);
+            t.posterShader.setLocalMatrix(posterMatrix);
+            fill.setShader(t.posterShader);
+            c.drawRoundRect(cell, r0 * s, r0 * s, fill);
+            fill.setShader(null);
+        } else {
+            fill.setShader(null);
+            fill.setColor(tone(0xFFDADADF, 0xFF2C2C2E));
+            c.drawRoundRect(cell, r0 * s, r0 * s, fill);
+        }
+        // focus sheen and rim
+        if (f > 0.01f) {
+            if (lightSheens.length != cardRects.length) {
+                lightSheens = new LinearGradient[cardRects.length];
+                lightRims = new LinearGradient[cardRects.length];
+                lightShaderW = new float[cardRects.length];
+            }
+            if (lightSheens[i] == null || lightShaderW[i] != bw) {
+                lightSheens[i] = new LinearGradient(-bw / 2, -bh / 2, 0, bh / 2, 0x38FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP);
+                lightRims[i] = new LinearGradient(0, -bh / 2, 0, bh / 2, 0xE6FFFFFF, 0x59FFFFFF, Shader.TileMode.CLAMP);
+                lightShaderW[i] = bw;
+            }
+            int alpha = Math.round(255 * f);
+            c.save();
+            c.translate(cx, cy);
+            c.scale(s, s);
+            tmp.set(-bw / 2, -bh / 2, bw / 2, bh / 2);
+            sheen.setShader(lightSheens[i]);
+            sheen.setAlpha(alpha);
+            c.drawRoundRect(tmp, r0, r0, sheen);
+            sheen.setAlpha(255);
+            rim.setShader(lightRims[i]);
+            rim.setAlpha(alpha);
+            rim.setStrokeWidth(2.5f * k / s);
+            c.drawRoundRect(tmp, r0, r0, rim);
+            rim.setStrokeWidth(2.5f * k);
+            rim.setAlpha(255);
+            c.restore();
+        }
+        if (t == null) return;
+        // title below card
+        float textY = base.bottom + 36 * k;
+        fitPaint.set(lCardTitle);
+        c.drawText(TextUtils.ellipsize(t.title, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, textY, lCardTitle);
+        // match % and provider
+        textY += 28 * k;
+        float tx = base.left;
+        if (t.matchPercent > 0) {
+            String pct = t.matchPercent + "%";
+            c.drawText(pct, tx, textY, matchPaint);
+            tx += matchPaint.measureText(pct) + 10 * k;
+        }
+        if (t.providers.length > 0) {
+            fitPaint.set(providerPaint);
+            String prov = TextUtils.ellipsize(t.providers[0], fitPaint, bw - (tx - base.left), TextUtils.TruncateAt.END).toString();
+            c.drawText(prov, tx, textY, providerPaint);
+        }
+        // reason
+        if (t.reason != null && !t.reason.isEmpty()) {
+            textY += 26 * k;
+            fitPaint.set(reasonPaint);
+            c.drawText(TextUtils.ellipsize(t.reason, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, textY, reasonPaint);
         }
     }
 
@@ -3341,15 +3551,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 } else if (dy < 0) {
                     if (row > 0) {
                         shelfIndex = shelfIndex - SHELF_COLS;   // the row above
-                    } else if (cards.isEmpty()) {
-                        // Up from an empty shelf too: move()'s older zones (the hero, the corner capsule) aren't drawn
-                        // any more.
-                        if (!picksOn() && lightButtons.isEmpty()) return true;   // no tabs and no buttons above
+                    } else if (!kokoMode && cards.isEmpty()) {
+                        if (!picksOn() && lightButtons.isEmpty()) return true;
                         zone = Z_TOP;
                         topIndex = picksOn() ? tab : 3;
                     } else {
                         zone = Z_CARDS;
-                        cardIndex = nearest(cardRects, cards.size(), tileRects[shelfIndex].centerX());
+                        cardIndex = nearest(cardRects, kokoMode ? cardCount : cards.size(), tileRects[shelfIndex].centerX());
                     }
                 } else {
                     int below = shelfFirst + (row + 1) * SHELF_COLS + col;
@@ -3363,19 +3571,21 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 }
                 break;
             }
-            case Z_CARDS:
+            case Z_CARDS: {
+                int bound = kokoMode ? cardCount : cards.size();
                 if (dx != 0) {
-                    int next = Math.max(0, Math.min(cards.size() - 1, cardIndex + dx));
+                    int next = Math.max(0, Math.min(bound - 1, cardIndex + dx));
                     if (next == cardIndex) return true;
                     cardIndex = next;
                 } else if (dy < 0) {
                     zone = Z_TOP;
-                    topIndex = tab;     // as on Apple TV: moving up to the tabs focuses the selected tab
+                    topIndex = tab;
                 } else {
                     zone = Z_SHELF;
-                    if (!shelf.isEmpty()) shelfIndex = nearestShelf(cardRects[cardIndex].centerX(), 0);   // the top row
+                    if (!shelf.isEmpty()) shelfIndex = nearestShelf(cardRects[cardIndex].centerX(), 0);
                 }
                 break;
+            }
             case Z_TOP:
                 if (dx != 0) {
                     int next = Math.max(picksOn() ? 0 : 3, Math.min(2 + lightButtons.size(), topIndex + dx));
@@ -3383,12 +3593,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     topIndex = next;
                     if (topIndex < 3) selectTab(topIndex);   // like Apple TV tabs: focusing a tab selects it
                 } else if (dy > 0) {
-                    if (cards.isEmpty()) {
+                    if (!kokoMode && cards.isEmpty()) {
                         zone = Z_SHELF;
-                        if (!shelf.isEmpty()) shelfIndex = nearestShelf(topRects[topIndex].centerX(), 0);   // the top row
+                        if (!shelf.isEmpty()) shelfIndex = nearestShelf(topRects[topIndex].centerX(), 0);
                     } else {
                         zone = Z_CARDS;
-                        cardIndex = nearest(cardRects, cards.size(), topRects[topIndex].centerX());
+                        cardIndex = nearest(cardRects, kokoMode ? cardCount : cards.size(), topRects[topIndex].centerX());
                     }
                 } else if (topIndex < 3 && !lightButtons.isEmpty()) {
                     topIndex = 3;   // up from the tabs reaches the corner buttons without walking the row
@@ -3419,14 +3629,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 } else if (dy < 0) {
                     if (row > 0) {
                         haIndex = HA_ROW[row - 1][0] + Math.min(col, HA_ROW[row - 1][1] - 1);
-                    } else if (cards.isEmpty()) {
+                    } else if (!kokoMode && cards.isEmpty()) {
                         if (!picksOn() && lightButtons.isEmpty()) return true;
                         zone = Z_TOP;
                         topIndex = picksOn() ? tab : 3;
                     } else {
-                        // Up from the panel's top row: the recommendation card right above it.
                         zone = Z_CARDS;
-                        cardIndex = nearest(cardRects, cards.size(), haRects[haIndex].centerX());
+                        cardIndex = nearest(cardRects, kokoMode ? cardCount : cards.size(), haRects[haIndex].centerX());
                     }
                 } else {
                     if (row + 1 < HA_ROWS) {
