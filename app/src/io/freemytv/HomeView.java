@@ -92,8 +92,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     /** Blur radii of the shadow and shadowDeep paints (Shadows needs them to draw the same blur on older TVs). */
     private static final float SHADOW_BLUR = 26, DEEP_BLUR = 30;
     private static final int SKY = 0, HERO = 1, STATUS = 2, PLATTER = 3, TILES = 4, DRAWER = 5, SHEET = 6, TOAST = 7,
-            HA = 8;
-    private static final int Z_STATUS = 0, Z_HERO = 1, Z_SHELF = 2, Z_DRAWER = 3;
+            HA = 8, QR_MODAL = 9;
+    private static final int Z_STATUS = 0, Z_HERO = 1, Z_SHELF = 2, Z_DRAWER = 3, Z_QR_MODAL = 8;
     private static final ExecutorService LOADER = Executors.newSingleThreadExecutor();
     // Light design (the L_ constants): title, tab bar, three recommendation cards and the shelf.
     // The tab bar is a 68 px capsule; the cards sit on the 5-column grid (the wide one spans 3).
@@ -116,12 +116,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final float HA_RADIUS = TILE_RADIUS + SHELF_PAD;
     private static final int HA_ROWS = 3, HA_COUNT = 8, HA_SEGMENTS = 3;
     /** How many items each row of the panel holds: {first item, how many}. */
-    private static final int[][] HA_ROW = {{0, 3}, {3, 3}, {6, 2}};
-    private static final int HA_LIGHTS = 3, HA_MASTER = 4, HA_BRIGHTNESS = 5, HA_COZY = 6, HA_DAYLIGHT = 7;
+    private static final int[][] HA_ROW = {{0, 3}, {3, 2}, {5, 3}};
+    private static final int HA_LIGHTS = 3, HA_BRIGHTNESS = 4, HA_COZY = 5, HA_DAYLIGHT = 6, HA_LESELICHT = 7;
     private static String[] tabs;
     private static int tabsGeneration = -1;
     private static final String[] TAB_KIND = {null, "movie", "tv"};
-    private static final int Z_TOP = 4, Z_CARDS = 5, Z_HA = 6;
+    private static final int Z_TOP = 4, Z_CARDS = 5, Z_HA = 6, Z_AVATARS = 7;
 
     private final Activity activity;
     private final Scene scene = new Scene();
@@ -144,7 +144,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         @Override public void hold(int id) { a11yHold(); }
     });
     private final RectF a11yRect = new RectF();
-    private final Layer sky, heroLayer, status, platter, tiles, drawerLayer, sheetLayer, toastLayer, haLayer;
+    private final Layer sky, heroLayer, status, platter, tiles, drawerLayer, sheetLayer, toastLayer, haLayer, qrModalLayer;
     private int zone = Z_SHELF;
 
     // Night look (like Apple's "Automatic" appearance): darker from sunset to sunrise, with a 2 s transition.
@@ -161,6 +161,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private int tab, topIndex, cardIndex;
     private int widgetIndex;    // with TalkBack on, the drawer's weather (0) or quotes (1) card can take the focus
     private List<Recs.Pick> cards = new ArrayList<>();
+    // Tab transition animation: fade out/in with zoom
+    private final Spring cardsFade = new Spring(0.38f, 0.92f, 1);
+    private int pendingTab = -1;  // Tab to switch to after fade out
+    private static final long FADE_OUT_MS = 250;
     // The three tabs, then the round buttons at the top right (up to HomeApps.MAX_TOP).
     private final Spring[] topFocus = new Spring[3 + HomeApps.MAX_TOP];
     private final RectF[] topRects = new RectF[3 + HomeApps.MAX_TOP];
@@ -175,11 +179,20 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private List<KokoRecs.Title> kokoCards = new ArrayList<>();
     private List<KokoRecs.User> kokoUsers = new ArrayList<>();
     private boolean kokoMode;
-    /** The "Load new recommendations" card at the end of the carousel. */
-    private boolean kokoRefreshCard;
-    private static final float AVATAR_SIZE = 46, AVATAR_GAP = -12;
+    private static final float AVATAR_SIZE = 72, AVATAR_GAP = 16;
     private static final float KOKO_CARD_W = 200;
+    private static final int AVATARS = 10;  // max avatars + plus button
     private Paint avatarInitial, matchPaint, providerPaint, reasonPaint;
+    private final Map<Integer, Backdrop> kokoBackdrops = new HashMap<>();
+    private Bitmap movieKonductLogo;
+    private final Spring[] avatarFocus = new Spring[AVATARS];
+    private final RectF[] avatarRects = new RectF[AVATARS];
+    private int avatarIndex = -1;
+    private boolean qrModalOpen;
+    private final Spring qrModal = new Spring(0.3f, 0.88f, 0);
+    private final Spring qrCloseButtonFocus = new Spring(0.3f, 0.85f, 0);
+    private final RectF qrCloseButtonRect = new RectF();
+    private int savedZone = Z_SHELF;
 
     // Home Assistant panel (right of the shelf): its own glass, six cards and their focus.
     private final HomeAssistant ha = new HomeAssistant();
@@ -384,6 +397,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 case DRAWER: drawDrawer(c); break;
                 case SHEET: drawSheet(c); break;
                 case HA: drawHa(c); break;
+                case QR_MODAL: drawQrModal(c); break;
                 default: drawToast(c); break;
             }
             scene.setOffset(0, 0);
@@ -458,15 +472,17 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         sheetLayer = new Layer(a, SHEET);
         toastLayer = new Layer(a, TOAST);
         haLayer = new Layer(a, HA);
+        qrModalLayer = new Layer(a, QR_MODAL);
         // Hardware layers on the GPU: only the one that changed is redrawn; moving, fading and scaling stay cheap.
         // Not on Android 8 to 11: on older GPUs (a Mi Box 3's Mali-450) redrawing and compositing a big layer on every
         // frame cost more than drawing straight to the screen (measured: focus on the picks 33 → 12 ms a frame, the
         // drawer 19 → 17 ms).
-        for (View v : new View[] {heroLayer, status, platter, tiles, drawerLayer, sheetLayer, haLayer}) v.setLayerType(Ui.LEGACY ? LAYER_TYPE_NONE : LAYER_TYPE_HARDWARE, null);
-        for (View v : new View[] {sky, heroLayer, status, platter, tiles, drawerLayer, sheetLayer, toastLayer, haLayer}) {
+        for (View v : new View[] {heroLayer, status, platter, tiles, drawerLayer, sheetLayer, haLayer, qrModalLayer}) v.setLayerType(Ui.LEGACY ? LAYER_TYPE_NONE : LAYER_TYPE_HARDWARE, null);
+        for (View v : new View[] {sky, heroLayer, status, platter, tiles, drawerLayer, sheetLayer, toastLayer, haLayer, qrModalLayer}) {
             v.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);   // TalkBack reads the items (Spoken)
             addView(v);
         }
+        qrModalLayer.setVisibility(INVISIBLE);
         setContentDescription("Free My TV");
         drawerLayer.setVisibility(INVISIBLE);
         for (int i = 0; i < topFocus.length; i++) {
@@ -474,12 +490,16 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             topRects[i] = new RectF();
         }
         for (int i = 0; i < MAX_CARDS; i++) {
-            cardFocus[i] = new Spring(0.32f, 0.78f, 0);
+            cardFocus[i] = new Spring(0.48f, 0.92f, 0);  // Smoother, more damped for scroll animation
             cardRects[i] = new RectF();
         }
         for (int i = 0; i < HA_COUNT; i++) {
             haFocus[i] = new Spring(0.3f, 0.8f, 0);
             haRects[i] = new RectF();
+        }
+        for (int i = 0; i < AVATARS; i++) {
+            avatarFocus[i] = new Spring(0.28f, 0.82f, 0);
+            avatarRects[i] = new RectF();
         }
         kokoRecs = KokoRecs.get(a);
         setLightButtons(HomeApps.topButtons());
@@ -651,6 +671,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         measure(toastLayer, Math.round(1000 * kk), Math.round(220 * kk));
         // The panel's layer holds its glass and the focus glow around the cards.
         measure(haLayer, Math.round((HA_R - HA_L + 40) * kk), Math.round((HA_BOT - HA_TOP + 40) * kk));
+        measure(qrModalLayer, width, height);
         setMeasuredDimension(width, height);
     }
 
@@ -672,6 +693,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         sheetLayer.setPivotY(height / 2f);
         place(toastLayer, (width - toastLayer.getMeasuredWidth()) / 2, 0);
         place(haLayer, Math.round((HA_L - 20) * kk), Math.round((HA_TOP - 20) * kk));
+        qrModalLayer.layout(0, 0, width, height);
     }
 
     private static void place(View v, int x, int y) {
@@ -801,8 +823,19 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         boolean statusMoving = step(statusFocus, dt);
         boolean heroMoving = heroFocus.step(dt);
         boolean topMoving = step(topFocus, dt), cardsMoving = step(cardFocus, dt);
-        if (topMoving) status.invalidate();
-        heroMoving |= topMoving | cardsMoving;
+        boolean avatarMoving = step(avatarFocus, dt);
+        boolean qrMoving = qrModal.step(dt);
+        boolean qrButtonMoving = qrCloseButtonFocus.step(dt);
+        boolean cardsFadeMoving = cardsFade.step(dt);
+
+        // When fade reaches 0, switch the tab content, then fade in
+        if (pendingTab >= 0 && cardsFade.value < 0.05f && cardsFade.target == 0) {
+            finishTabSwitch();
+        }
+
+        if (topMoving || avatarMoving) status.invalidate();
+        heroMoving |= topMoving | cardsMoving | avatarMoving | qrMoving | cardsFadeMoving;
+        if (qrButtonMoving) qrModalLayer.invalidate();
         boolean drawerItemsMoving = step(drawerFocus, dt);
         boolean gridMoving = step(gridFocus, dt) | scroll.step(dt);
         boolean haMoving = step(haFocus, dt);
@@ -824,11 +857,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (drawerItemsMoving || drawerDirty || bgFading) drawerLayer.invalidate();
         if (gridMoving || gridDirty) sheetLayer.invalidate();
         if (haMoving || haDirty) haLayer.invalidate();
+        if (qrMoving) qrModalLayer.invalidate();
         if (drawerMoving || bgFading) sky.invalidate();
         if (bgFading || (drawerWasMoving && !drawerMoving)) {
             platter.invalidate();
             haLayer.invalidate();   // its glass reads the background again, where it ended up
         }
+        // Show/hide QR modal layer
+        qrModalLayer.setVisibility(qrModalOpen || qrModal.value > 0.001f ? VISIBLE : INVISIBLE);
         drawerWasMoving = drawerMoving;
         tilesDirty = statusDirty = heroDirty = drawerDirty = gridDirty = motionDirty = haDirty = false;
         if (updateClock()) {
@@ -840,8 +876,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
         // Busy: something is moving, or the sheet or the drawer is open.
         boolean busy = tilesMoving || statusMoving || heroMoving || drawerItemsMoving || gridMoving || drawerMoving || haMoving
-                || sheetMoving || toastFading || heroFading || bgFading || nightMoving || sheetOpen || sheet.value > 0.001f
-                || drawerOpen || drawer.value > 0.001f || toast != null || !toasts.isEmpty();
+                || sheetMoving || toastFading || heroFading || bgFading || nightMoving || avatarMoving || qrMoving || qrButtonMoving || sheetOpen || sheet.value > 0.001f
+                || drawerOpen || drawer.value > 0.001f || toast != null || !toasts.isEmpty() || qrModalOpen || qrModal.value > 0.001f;
         idle = !busy;
         if (busy) Choreographer.getInstance().postFrameCallback(this);
         else Choreographer.getInstance().postFrameCallbackDelayed(this, 1000);
@@ -1998,11 +2034,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (snap) heroFocus.snap(heroFocus.target);
         boolean haChanged = aim(haFocus, !sheetOpen && zone == Z_HA ? haIndex : -1, snap);
         boolean topChanged = aim(topFocus, !sheetOpen && zone == Z_TOP ? topIndex : -1, snap);
-        heroChanged |= aim(cardFocus, !sheetOpen && zone == Z_CARDS ? cardIndex : -1, snap) | topChanged;
-        statusChanged |= topChanged;
+        boolean avatarChanged = aim(avatarFocus, !sheetOpen && zone == Z_AVATARS ? avatarIndex : -1, snap);
+        heroChanged |= aim(cardFocus, !sheetOpen && zone == Z_CARDS ? cardIndex : -1, snap) | topChanged | avatarChanged;
+        statusChanged |= topChanged | avatarChanged;
         tilesDirty |= snap || tilesChanged;
         statusDirty |= snap || statusChanged;
-        heroDirty |= snap || heroChanged;
+        heroDirty |= snap || heroChanged || avatarChanged;
         drawerDirty |= snap || drawerChanged;
         haDirty |= snap || haChanged;
         syncBackground();   // a card with the focus brings its own background; without one, the neutral look
@@ -2347,7 +2384,17 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private void back() {
-        if (sheetOpen) {
+        if (qrModalOpen) {
+            qrModalOpen = false;
+            qrModal.target = 0;
+            zone = savedZone;
+            qrCloseButtonFocus.snap(0);
+            qrModalLayer.invalidate();
+            retarget(true);
+            wake();
+            click.move();
+            spoken.focusMoved();
+        } else if (sheetOpen) {
             closeSheet();
         } else if (zone == Z_DRAWER || zone == WIDGETS) {
             closeDrawer();
@@ -2362,6 +2409,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private void move(int dx, int dy) {
+        if (qrModalOpen) {
+            // No navigation in QR modal - only OK to close or Back
+            return;
+        }
         if (sheetOpen) {
             moveGrid(dx, dy);
             return;
@@ -2514,11 +2565,6 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             it = lightButtons.get(topIndex - 3);
             r = topRects[topIndex];
         } else if (zone == Z_CARDS && kokoMode) {
-            if (kokoRefreshCard && cardIndex == cardCount - 1) {
-                kokoRecs.fetch();
-                click.open();
-                return;
-            }
             KokoRecs.Title t = cardIndex < kokoCards.size() ? kokoCards.get(cardIndex) : null;
             if (t == null) return;
             if (t.pkg != null) {
@@ -2534,6 +2580,31 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             r = cardRects[cardIndex];
         } else if (zone == Z_HA) {
             haActivate();
+            return;
+        } else if (zone == Z_QR_MODAL) {
+            // Close button clicked in QR modal
+            back();
+            return;
+        } else if (zone == Z_AVATARS) {
+            // Avatar clicked: toggle user or open QR modal
+            if (avatarIndex < kokoUsers.size()) {
+                KokoRecs.User u = kokoUsers.get(avatarIndex);
+                kokoRecs.toggleUser(u.id);
+                click.open();
+            } else {
+                // Plus button clicked: open QR modal
+                savedZone = zone;
+                qrModalOpen = true;
+                qrModal.snap(0);
+                qrModal.target = 1;
+                zone = Z_QR_MODAL;
+                qrCloseButtonFocus.snap(1);
+                qrModalLayer.setVisibility(VISIBLE);
+                qrModalLayer.invalidate();
+                wake();
+                click.open();
+                spoken.focusMoved();
+            }
             return;
         } else {
             if (shelf.isEmpty()) return;
@@ -2846,7 +2917,6 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 return Ui.trf("{name}, tab {i} of {n}", "name", tabs()[i], "i", i + 1, "n", 3);
             case Z_CARDS:
                 if (kokoMode) {
-                    if (kokoRefreshCard && i == cardCount - 1) return Ui.tr("New picks");
                     KokoRecs.Title t = i < kokoCards.size() ? kokoCards.get(i) : null;
                     return t != null ? t.title + (t.matchPercent > 0 ? ", " + t.matchPercent + "%" : "") : "";
                 }
@@ -3081,9 +3151,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         float top = L_CARDS_TOP * k, ch = L_CARD_H * k, g = L_CARD_GAP * k, left = MARGIN * k, tall = L_TALL_W * k;
         if (kokoMode) {
-            float cw = KOKO_CARD_W * k;
+            float normalW = KOKO_CARD_W * k;
+            float selectedW = normalW * 1.5f;  // Selected card 50% wider
+            x = left;
             for (int i = 0; i < cardCount; i++) {
-                cardRects[i].set(left + i * (cw + g), top, left + i * (cw + g) + cw, top + ch);
+                float cw = (i == cardIndex) ? selectedW : normalW;  // Only selected card is wider
+                cardRects[i].set(x, top, x + cw, top + ch);
+                x += cw + g;
             }
         } else {
             float wide = (CONTENT_R - MARGIN) * k - 2 * tall - 2 * g;
@@ -3108,12 +3182,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             kokoMode = !list.isEmpty();
             if (kokoMode) {
                 kokoCards = list;
-                kokoRefreshCard = true;
-                cardCount = Math.min(list.size() + 1, MAX_CARDS);
+                cardCount = Math.min(list.size(), MAX_CARDS);
                 cardIndex = Math.min(cardIndex, cardCount - 1);
             } else {
                 kokoCards = list;
-                kokoRefreshCard = false;
                 cardCount = 3;
             }
             layoutLight();
@@ -3147,6 +3219,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (drawerOpen || sheetOpen || drawer.value > 0.001f || sheet.value > 0.001f) return;
         Backdrop b;
         if (kokoMode) {
+            // KokoMode: no backdrop, keep neutral background
             b = null;
         } else if (!picksOn()) {
             b = Photos.on(getContext()) ? Photos.backdrop(getContext(), ownReady) : null;
@@ -3156,6 +3229,19 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (b != null || bgTo != null) showBackdrop(b);
     }
 
+    /** Create a Backdrop from a KokoRecs title's backdrop bitmap. */
+    private Backdrop kokoBackdrop(KokoRecs.Title t) {
+        if (t == null || t.backdropBitmap == null || t.backdropBitmap.isRecycled()) return null;
+        // Cache backdrops by TMDB ID to avoid recreating them
+        if (kokoBackdrops.containsKey(t.tmdbId)) return kokoBackdrops.get(t.tmdbId);
+        // Create a copy because Backdrop.make() recycles the source bitmap
+        Bitmap copy = t.backdropBitmap.copy(t.backdropBitmap.getConfig(), false);
+        if (copy == null) return null;
+        Backdrop b = Backdrop.make(copy, true);
+        if (b != null) kokoBackdrops.put(t.tmdbId, b);
+        return b;
+    }
+
     /** Your photo's background is ready (or new photos came in): draw it. */
     private final Runnable ownReady = () -> {
         if (running) updatePicks();
@@ -3163,8 +3249,18 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private void selectTab(int index) {
         if (index == tab) return;
-        tab = index;
+        // Start fade out animation, then switch tab
+        pendingTab = index;
+        cardsFade.target = 0;
+        wake();
+    }
+
+    private void finishTabSwitch() {
+        if (pendingTab < 0) return;
+        tab = pendingTab;
+        pendingTab = -1;
         updateCards();
+        cardsFade.target = 1;
         heroDirty = true;
     }
 
@@ -3215,8 +3311,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             return;
         }
         drawHeaderClock(c);
-        String hello = Ui.tr("For You");
-        c.drawText(hello, MARGIN * k - Ui.leftBearing(lTitle, hello), L_TITLE_BASE * k, lTitle);
+        // Avatars and plus icon moved above the tabs
+        if (kokoMode) drawAvatarBar(c);
         // Text tabs (the selected one in bold, in the main text color); with focus on the tabs, the selected one gets
         // the white pill with a shadow and grows a little (the tvOS focus).
         float focus = Ui.clamp(topFocus[tab].value);
@@ -3241,7 +3337,6 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             if (i == tab) lTabOn.setColor(blend(tone(L_INK, WHITE), L_INK, focus));   // always dark on the white pill
             c.drawText(tabs()[i], r.centerX() - p.measureText(tabs()[i]) / 2, r.centerY() + Ui.halfCap(p), p);
         }
-        if (kokoMode) drawAvatarBar(c);
         int top = -1;
         int n = kokoMode ? cardCount : 3;
         for (int i = 0; i < n; i++) if (cardFocus[i].value > 0.02f && (top < 0 || cardFocus[i].value > cardFocus[top].value)) top = i;
@@ -3364,78 +3459,466 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
     }
 
-    /** Avatar bar: colored circles with initials for each household member, overlapping slightly. */
-    private void drawAvatarBar(Canvas c) {
-        float x = CONTENT_R * k - 10 * k, cy = L_TITLE_BASE * k - 14 * k;
-        float size = AVATAR_SIZE * k, gap = AVATAR_GAP * k;
-        float totalW = kokoUsers.size() * size + Math.max(0, kokoUsers.size() - 1) * gap;
-        x -= totalW;
-        for (int i = 0; i < kokoUsers.size(); i++) {
-            KokoRecs.User u = kokoUsers.get(i);
-            float cx2 = x + size / 2;
-            fill.setShader(null);
-            fill.setColor(u.active ? u.color : tone(0xFFAAAAAA, 0xFF555555));
-            fill.setAlpha(u.active ? 255 : 120);
-            c.drawCircle(cx2, cy, size / 2, fill);
-            fill.setAlpha(255);
-            if (u.name.length() > 0) {
-                String ini = u.name.substring(0, 1).toUpperCase(java.util.Locale.ROOT);
-                avatarInitial.setAlpha(u.active ? 255 : 150);
-                c.drawText(ini, cx2, cy + Ui.halfCap(avatarInitial), avatarInitial);
+    /** QR Modal: shows invitation link to watch.kokohome.de */
+    private void drawQrModal(Canvas c) {
+        float f = Ui.clamp(qrModal.value);
+        if (f < 0.01f) return;
+
+        // Blurred background using frosted glass effect
+        RectF fullScreen = new RectF(0, 0, w, h);
+        scene.glass(c, fullScreen, 0, tone(0xFFF5F5F7, 0xFF1C1C1E), tone(0.92f, 0.96f) * f,
+                0, 0, 0, 0.02f, f);
+
+        // Additional dimming
+        veil.setShader(null);
+        veil.setColor(Ui.alpha(tone(0xFFF5F5F7, 0xFF000000), tone(0.3f, 0.45f) * f));
+        c.drawRect(0, 0, w, h, veil);
+
+        // Modal dimensions
+        float modalW = 900 * k, modalH = 580 * k;
+        float cx = w / 2f, cy = h / 2f;
+        float left = cx - modalW / 2, top = cy - modalH / 2;
+        float rad = 28 * k;
+
+        tmp.set(left, top, left + modalW, top + modalH);
+
+        // Shadow
+        RectF shadowRect = new RectF(tmp);
+        shadowRect.offset(0, 12 * k * f);
+        shadow.setColor(Ui.alpha(0xFF000000, tone(0.3f, 0.55f) * f));
+        shadows.draw(c, shadowRect, rad, DEEP_BLUR * k, shadow);
+
+        // Glass background with stronger effect
+        scene.liquid(c, tmp, rad, tone(0xFFFFFFFF, SMOKE), tone(0.7f, 0.65f), tone(0.1f, 0.05f),
+                20 * k, 14 * k, tone(0.75f, 0.6f), f);
+
+        // Subtle inner glow
+        if (f > 0.5f) {
+            sheen.setShader(null);
+            sheen.setColor(Ui.alpha(0xFFFFFFFF, tone(0.2f, 0.1f) * f));
+            c.drawRoundRect(tmp, rad, rad, sheen);
+        }
+
+        // Title - smaller
+        lCardTitle.setAlpha(Math.round(255 * f));
+        lCardTitle.setTextSize(42 * k);
+        String title = Ui.tr("Add household member");
+        float titleY = top + 58 * k;
+        c.drawText(title, cx - lCardTitle.measureText(title) / 2, titleY, lCardTitle);
+
+        // Layout: QR code on left, instructions on right
+        float qrSize = 280 * k;
+        float qrLeft = left + 80 * k;
+        float qrTop = top + 120 * k;
+
+        // QR Code container with glass effect
+        tmp.set(qrLeft, qrTop, qrLeft + qrSize, qrTop + qrSize);
+        float qrRad = 18 * k;
+
+        // QR background glass
+        scene.liquid(c, tmp, qrRad, tone(0xFFF8F8F8, 0xFF2A2A2C), tone(0.6f, 0.55f), tone(0.05f, 0.03f),
+                14 * k, 10 * k, tone(0.65f, 0.5f), f);
+
+        // Draw kokohome logo
+        try {
+            android.graphics.Bitmap logo = android.graphics.BitmapFactory.decodeStream(
+                getContext().getAssets().open("symbols/logo.png"));
+            if (logo != null) {
+                float logoSize = qrSize * 0.7f;
+                float logoLeft = qrLeft + (qrSize - logoSize) / 2;
+                float logoTop = qrTop + (qrSize - logoSize) / 2;
+                bitmapPaint.setAlpha(Math.round(255 * f));
+                tmp.set(logoLeft, logoTop, logoLeft + logoSize, logoTop + logoSize);
+                c.drawBitmap(logo, null, tmp, bitmapPaint);
+                bitmapPaint.setAlpha(255);
             }
-            // ring around focused avatar when user is in the top zone near the bar
-            x += size + gap;
+        } catch (Exception e) {
+            // Fallback: draw QR pattern
+            drawQrPattern(c, qrLeft + qrSize / 2, qrTop + qrSize / 2, qrSize * 0.85f, f);
+        }
+
+        // Instructions on the right
+        float textLeft = qrLeft + qrSize + 60 * k;
+
+        lCardMeta.setAlpha(Math.round(255 * f));
+        lCardMeta.setTextSize(24 * k);
+        String instr1 = Ui.tr("Scan this code or visit:");
+        float instr1Y = qrTop + 30 * k;
+        c.drawText(instr1, textLeft, instr1Y, lCardMeta);
+
+        // URL in larger text with glass background
+        lCardTitle.setAlpha(Math.round(255 * f));
+        lCardTitle.setTextSize(38 * k);
+        String url = "watch.kokohome.de";
+        float urlY = instr1Y + 80 * k;
+        float urlW = lCardTitle.measureText(url);
+
+        // URL background pill
+        tmp.set(textLeft - 20 * k, urlY - 45 * k, textLeft + urlW + 20 * k, urlY + 15 * k);
+        scene.liquid(c, tmp, tmp.height() / 2, tone(0xFFF0F0F2, 0xFF3A3A3C), tone(0.55f, 0.5f),
+                tone(0.03f, 0.02f), 10 * k, 7 * k, tone(0.6f, 0.45f), f);
+        c.drawText(url, textLeft, urlY, lCardTitle);
+
+        // More instructions
+        lCardMeta.setTextSize(20 * k);
+        String instr2 = Ui.tr("Follow the setup instructions");
+        float instr2Y = urlY + 70 * k;
+        c.drawText(instr2, textLeft, instr2Y, lCardMeta);
+
+        String instr3 = Ui.tr("to connect your device");
+        float instr3Y = instr2Y + 35 * k;
+        c.drawText(instr3, textLeft, instr3Y, lCardMeta);
+
+        // Close button at bottom
+        float btnW = 180 * k, btnH = 52 * k;
+        float btnLeft = cx - btnW / 2, btnTop = top + modalH - 90 * k;
+        qrCloseButtonRect.set(btnLeft, btnTop, btnLeft + btnW, btnTop + btnH);
+
+        // Button focus animation
+        float btnFocus = Ui.clamp(qrCloseButtonFocus.value);
+        float btnScale = 1 + 0.06f * btnFocus;
+        float btnCx = qrCloseButtonRect.centerX(), btnCy = qrCloseButtonRect.centerY();
+        tmp.set(btnCx - btnW * btnScale / 2, btnCy - btnH * btnScale / 2,
+                btnCx + btnW * btnScale / 2, btnCy + btnH * btnScale / 2);
+
+        // Button shadow
+        shadowRect.set(tmp);
+        shadowRect.offset(0, (4 + 4 * btnFocus) * k);
+        shadow.setColor(Ui.alpha(0xFF000000, (tone(0.15f, 0.35f) + 0.15f * btnFocus) * f));
+        shadows.draw(c, shadowRect, btnH * btnScale / 2, SHADOW_BLUR * k, shadow);
+
+        // Button background
+        scene.liquid(c, tmp, btnH * btnScale / 2, tone(0xFFFFFFFF, 0xFF3A3A3C), tone(0.65f + 0.1f * btnFocus, 0.55f + 0.1f * btnFocus),
+                tone(0.05f, 0.03f), 12 * k, 8 * k, tone(0.7f, 0.5f), f);
+
+        // Button focus glow
+        if (btnFocus > 0.01f) {
+            sheen.setShader(null);
+            sheen.setColor(Ui.alpha(0xFFFFFFFF, tone(0.25f, 0.15f) * btnFocus * f));
+            c.drawRoundRect(tmp, btnH * btnScale / 2, btnH * btnScale / 2, sheen);
+        }
+
+        // Button text - properly centered vertically
+        lTip.setAlpha(Math.round(255 * f));
+        lTip.setTextSize(24 * k);
+        String closeText = Ui.tr("Close");
+        c.drawText(closeText, btnCx - lTip.measureText(closeText) / 2, btnCy + Ui.halfCap(lTip), lTip);
+    }
+
+    /** Draw a symbolic QR code pattern based on URL */
+    private void drawQrPattern(Canvas c, float cx, float cy, float size, float alpha) {
+        int modules = 25; // Standard QR code size (version 2)
+        float moduleSize = size / modules;
+        int color = tone(0xFF1C1C1E, 0xFFF5F5F7);
+
+        fill.setShader(null);
+        fill.setColor(color);
+        fill.setAlpha(Math.round(255 * alpha));
+
+        // Draw finder patterns (3 corners)
+        drawFinderPattern(c, cx - size / 2 + moduleSize * 3.5f, cy - size / 2 + moduleSize * 3.5f, moduleSize * 7);
+        drawFinderPattern(c, cx + size / 2 - moduleSize * 3.5f, cy - size / 2 + moduleSize * 3.5f, moduleSize * 7);
+        drawFinderPattern(c, cx - size / 2 + moduleSize * 3.5f, cy + size / 2 - moduleSize * 3.5f, moduleSize * 7);
+
+        // Draw alignment pattern (center-right)
+        float alignX = cx + size / 2 - moduleSize * 7;
+        float alignY = cy + size / 2 - moduleSize * 7;
+        drawAlignmentPattern(c, alignX, alignY, moduleSize * 5);
+
+        // Draw timing patterns (horizontal and vertical lines)
+        for (int i = 8; i < modules - 8; i++) {
+            if (i % 2 == 0) {
+                // Horizontal timing
+                float x = cx - size / 2 + i * moduleSize;
+                float y = cy - size / 2 + 6 * moduleSize;
+                c.drawRect(x, y, x + moduleSize * 0.9f, y + moduleSize * 0.9f, fill);
+                // Vertical timing
+                x = cx - size / 2 + 6 * moduleSize;
+                y = cy - size / 2 + i * moduleSize;
+                c.drawRect(x, y, x + moduleSize * 0.9f, y + moduleSize * 0.9f, fill);
+            }
+        }
+
+        // Draw data pattern (URL-based hash pattern)
+        String url = "https://watch.kokohome.de";
+        int urlHash = url.hashCode();
+
+        for (int row = 0; row < modules; row++) {
+            for (int col = 0; col < modules; col++) {
+                // Skip finder pattern areas
+                if ((row < 9 && col < 9) || (row < 9 && col >= modules - 8) ||
+                    (row >= modules - 8 && col < 9)) continue;
+
+                // Skip timing patterns
+                if ((row == 6 && col > 8 && col < modules - 8) ||
+                    (col == 6 && row > 8 && row < modules - 8)) continue;
+
+                // Skip alignment pattern area
+                if (row >= modules - 9 && row <= modules - 5 &&
+                    col >= modules - 9 && col <= modules - 5) continue;
+
+                // URL-based pattern generation
+                int hash = ((row * 31 + col * 17 + urlHash) ^ (row * col)) & 0xFF;
+                boolean dark = (hash % 100) < 45; // ~45% density for realistic QR
+
+                if (dark) {
+                    float x = cx - size / 2 + col * moduleSize;
+                    float y = cy - size / 2 + row * moduleSize;
+                    c.drawRect(x, y, x + moduleSize * 0.88f, y + moduleSize * 0.88f, fill);
+                }
+            }
+        }
+
+        // Format information around finder patterns (looks more authentic)
+        drawFormatInfo(c, cx, cy, size, moduleSize, modules);
+    }
+
+    /** Draw format information strips around finder patterns */
+    private void drawFormatInfo(Canvas c, float cx, float cy, float size, float moduleSize, int modules) {
+        // These are the dark/light patterns that appear around the finder patterns in real QR codes
+        boolean[] formatPattern = {true, false, true, false, true, true, false, false};
+
+        // Horizontal format info (top-left finder)
+        for (int i = 0; i < 8; i++) {
+            if (formatPattern[i]) {
+                float x = cx - size / 2 + (8 + i) * moduleSize;
+                float y = cy - size / 2 + 8 * moduleSize;
+                c.drawRect(x, y, x + moduleSize * 0.9f, y + moduleSize * 0.9f, fill);
+            }
+        }
+
+        // Vertical format info (top-left finder)
+        for (int i = 0; i < 7; i++) {
+            if (formatPattern[i]) {
+                float x = cx - size / 2 + 8 * moduleSize;
+                float y = cy - size / 2 + (modules - 1 - i) * moduleSize;
+                c.drawRect(x, y, x + moduleSize * 0.9f, y + moduleSize * 0.9f, fill);
+            }
         }
     }
 
-    /** KokoRecs poster card: poster image, title, match%, provider name, reason. The last card is "refresh". */
+    /** Draw alignment pattern (smaller square in center-right area) */
+    private void drawAlignmentPattern(Canvas c, float cx, float cy, float size) {
+        // Outer square
+        tmp.set(cx - size / 2, cy - size / 2, cx + size / 2, cy + size / 2);
+        c.drawRect(tmp, fill);
+
+        // White middle
+        fill.setColor(tone(0xFFF8F8F8, 0xFF2A2A2C));
+        float midSize = size * 0.6f;
+        tmp.set(cx - midSize / 2, cy - midSize / 2, cx + midSize / 2, cy + midSize / 2);
+        c.drawRect(tmp, fill);
+
+        // Dark center
+        fill.setColor(tone(0xFF1C1C1E, 0xFFF5F5F7));
+        float innerSize = size * 0.2f;
+        tmp.set(cx - innerSize / 2, cy - innerSize / 2, cx + innerSize / 2, cy + innerSize / 2);
+        c.drawRect(tmp, fill);
+    }
+
+    /** Draw QR finder pattern (corner squares) */
+    private void drawFinderPattern(Canvas c, float cx, float cy, float size) {
+        float outerSize = size;
+        float innerSize = size * 0.43f;
+        float midSize = size * 0.71f;
+
+        // Outer square
+        tmp.set(cx - outerSize / 2, cy - outerSize / 2, cx + outerSize / 2, cy + outerSize / 2);
+        c.drawRect(tmp, fill);
+
+        // White middle ring
+        fill.setColor(tone(0xFFF8F8F8, 0xFF2A2A2C));
+        tmp.set(cx - midSize / 2, cy - midSize / 2, cx + midSize / 2, cy + midSize / 2);
+        c.drawRect(tmp, fill);
+
+        // Black inner square
+        fill.setColor(tone(0xFF1C1C1E, 0xFFF5F5F7));
+        tmp.set(cx - innerSize / 2, cy - innerSize / 2, cx + innerSize / 2, cy + innerSize / 2);
+        c.drawRect(tmp, fill);
+    }
+
+    /** Avatar bar: liquid glass badges with initials for each household member, above the tabs. */
+    private void drawAvatarBar(Canvas c) {
+        float x = MARGIN * k;
+        // Position above the tabs
+        float cy = (L_TABBAR_TOP - 10) * k;
+
+        // Draw "MovieKonduct" title with logo above the avatar bar
+        float titleY = cy - 90 * k;  // Position title above avatars
+        float logoSize = 38 * k;
+
+        // Load logo once
+        if (movieKonductLogo == null) {
+            try (java.io.InputStream in = getContext().getAssets().open("symbols/logo.png")) {
+                movieKonductLogo = android.graphics.BitmapFactory.decodeStream(in);
+            } catch (Exception e) {
+                AppLog.w("MovieKonduct logo: " + e.getMessage());
+            }
+        }
+
+        if (movieKonductLogo != null && !movieKonductLogo.isRecycled()) {
+            float logoW = logoSize * movieKonductLogo.getWidth() / (float) movieKonductLogo.getHeight();
+            tmp.set(x, titleY - logoSize / 2, x + logoW, titleY + logoSize / 2);
+            c.drawBitmap(movieKonductLogo, null, tmp, bitmapPaint);
+            x += logoW + 12 * k;  // Space between logo and text
+        }
+
+        float savedSize = lTitle.getTextSize();
+        lTitle.setTextSize(42 * k);  // Slightly smaller than main title
+        c.drawText("MovieKonduct", x, titleY + Ui.halfCap(lTitle), lTitle);
+        lTitle.setTextSize(savedSize);  // Reset to original size
+
+        x = MARGIN * k;  // Reset x for avatars
+        float size = AVATAR_SIZE * k, gap = AVATAR_GAP * k;
+
+        for (int i = 0; i < kokoUsers.size(); i++) {
+            KokoRecs.User u = kokoUsers.get(i);
+            float cx = x + size / 2;
+            float f = Ui.clamp(avatarFocus[i].value);
+            float s = 1 + 0.08f * f;
+            float rad = size / 2 * s;
+
+            // Shadow
+            tmp.set(cx - rad, cy - rad, cx + rad, cy + rad);
+            tmp.offset(0, (3 + 5 * f) * k);
+            shadow.setColor(Ui.alpha(0xFF000000, tone(0.1f, 0.25f) + tone(0.08f, 0.15f) * f));
+            shadows.draw(c, tmp, rad, SHADOW_BLUR * k, shadow);
+
+            // Liquid glass circle with color tint
+            tmp.set(cx - rad, cy - rad, cx + rad, cy + rad);
+            int baseColor = u.active ? u.color : tone(0xFFAAAAAA, 0xFF555555);
+            float alpha = u.active ? 0.85f : 0.5f;
+
+            // Glass background with user color
+            scene.liquid(c, tmp, rad, Ui.alpha(baseColor, alpha), tone(0.45f, 0.4f),
+                    tone(0.02f, 0.01f), 10 * k, 6 * k, tone(0.5f, 0.35f), 1 - f * 0.2f);
+
+            // Focus glow
+            if (f > 0.01f) {
+                sheen.setShader(null);
+                sheen.setColor(Ui.alpha(0xFFFFFFFF, tone(0.3f, 0.2f) * f));
+                c.drawCircle(cx, cy, rad, sheen);
+            }
+
+            // Initial
+            if (u.name.length() > 0) {
+                String ini = u.name.substring(0, 1).toUpperCase(java.util.Locale.ROOT);
+                avatarInitial.setAlpha(u.active ? 255 : 180);
+                avatarInitial.setColor(0xFFFFFFFF);
+                avatarInitial.setTextSize(size * 0.42f);
+                c.drawText(ini, cx, cy + Ui.halfCap(avatarInitial), avatarInitial);
+            }
+
+            // Name on focus
+            if (f > 0.3f && u.name.length() > 0) {
+                lTip.setAlpha(Math.round(255 * (f - 0.3f) / 0.7f));
+                float tw = lTip.measureText(u.name);
+                c.drawText(u.name, cx - tw / 2, cy + rad + 28 * k, lTip);
+            }
+
+            avatarRects[i].set(cx - size / 2, cy - size / 2, cx + size / 2, cy + size / 2);
+            x += size + gap;
+        }
+
+        // Plus button after avatars
+        int plusIdx = kokoUsers.size();
+        float cx = x + size / 2;
+        float f = Ui.clamp(avatarFocus[plusIdx].value);
+        float s = 1 + 0.08f * f;
+        float rad = size / 2 * s;
+
+        // Shadow
+        tmp.set(cx - rad, cy - rad, cx + rad, cy + rad);
+        tmp.offset(0, (3 + 5 * f) * k);
+        shadow.setColor(Ui.alpha(0xFF000000, tone(0.1f, 0.25f) + tone(0.08f, 0.15f) * f));
+        shadows.draw(c, tmp, rad, SHADOW_BLUR * k, shadow);
+
+        // Liquid glass circle
+        tmp.set(cx - rad, cy - rad, cx + rad, cy + rad);
+        scene.liquid(c, tmp, rad, tone(0xFFFFFFFF, SMOKE), tone(0.5f, 0.45f),
+                tone(0.02f, 0.01f), 10 * k, 6 * k, tone(0.55f, 0.4f), 1 - f * 0.2f);
+
+        // Focus glow
+        if (f > 0.01f) {
+            sheen.setShader(null);
+            sheen.setColor(Ui.alpha(0xFFFFFFFF, tone(0.3f, 0.2f) * f));
+            c.drawCircle(cx, cy, rad, sheen);
+        }
+
+        // Plus icon
+        avatarInitial.setAlpha(255);
+        avatarInitial.setColor(tone(L_INK, 0xFFEEEEEE));
+        avatarInitial.setTextSize(size * 0.45f);
+        c.drawText("+", cx, cy + Ui.halfCap(avatarInitial), avatarInitial);
+
+        // Label on focus
+        if (f > 0.3f) {
+            lTip.setAlpha(Math.round(255 * (f - 0.3f) / 0.7f));
+            String label = Ui.tr("Add user");
+            float tw = lTip.measureText(label);
+            c.drawText(label, cx - tw / 2, cy + rad + 28 * k, lTip);
+        }
+
+        avatarRects[plusIdx].set(cx - size / 2, cy - size / 2, cx + size / 2, cy + size / 2);
+    }
+
+    /** KokoRecs poster card: poster image, title, match%, provider name, reason. */
     private void drawKokoCard(Canvas c, int i) {
         RectF base = cardRects[i];
-        boolean isRefresh = kokoRefreshCard && i == cardCount - 1;
-        KokoRecs.Title t = !isRefresh && i < kokoCards.size() ? kokoCards.get(i) : null;
-        float v = cardFocus[i].value, f = Ui.clamp(v), s = 1 + 0.05f * v;
+        KokoRecs.Title t = i < kokoCards.size() ? kokoCards.get(i) : null;
+
+        // Apply fade and zoom from tab transition
+        float fade = Ui.clamp(cardsFade.value);
+        float transitionZoom = 0.95f + 0.05f * fade;  // Slight zoom during transition
+
+        float v = cardFocus[i].value, f = Ui.clamp(v), s = (1 + 0.05f * v) * transitionZoom;
         float bw = base.width(), bh = base.height(), r0 = 18 * k;
         float cx = base.centerX(), cy = base.centerY() - 6 * k * v;
         cell.set(cx - bw * s / 2, cy - bh * s / 2, cx + bw * s / 2, cy + bh * s / 2);
+
+        // Early return if completely faded out
+        if (fade < 0.01f) return;
+
         // shadow
         c.save();
         c.translate(cx, cy);
         c.scale(s, s);
         tmp.set(-bw / 2, -bh / 2, bw / 2, bh / 2);
         tmp.offset(0, (10 + 14 * f) * k);
-        shadowDeep.setColor(Ui.alpha(0xFF000000, tone(0.14f, 0.32f) + tone(0.2f, 0.28f) * f));
+        shadowDeep.setColor(Ui.alpha(0xFF000000, (tone(0.14f, 0.32f) + tone(0.2f, 0.28f) * f) * fade));
         shadows.draw(c, tmp, r0, DEEP_BLUR * k, shadowDeep);
         c.restore();
-        if (isRefresh) {
-            scene.liquid(c, cell, r0 * s, tone(0xFFFFFFFF, SMOKE), tone(0.5f, 0.45f), tone(0.02f, 0.01f),
-                    12 * k, 8 * k, tone(0.55f, 0.4f), 1 - f * 0.3f);
-            if (f > 0.01f) {
-                fill.setShader(null);
-                fill.setColor(Ui.alpha(0xFFFFFFFF, f * 0.3f));
-                c.drawRoundRect(cell, r0 * s, r0 * s, fill);
-            }
-            Symbols.draw(getContext(), c, "sync", cell.centerX(), cell.centerY() - 10 * k,
-                    36 * k * s, tone(L_INK, 0xDDFFFFFF));
-            fitPaint.set(lCardTitle);
-            String label = Ui.tr("New picks");
-            c.drawText(label, cell.centerX() - fitPaint.measureText(label) / 2, cell.centerY() + 30 * k, lCardTitle);
-            return;
-        }
-        // poster image or placeholder
-        if (t != null && t.posterShader != null) {
-            posterSrc.set(0, 0, t.poster.getWidth(), t.poster.getHeight());
-            posterMatrix.setRectToRect(posterSrc, cell, android.graphics.Matrix.ScaleToFit.FILL);
-            t.posterShader.setLocalMatrix(posterMatrix);
+        // poster image or placeholder - draw background first to prevent black flash
+        fill.setShader(null);
+        fill.setColor(Ui.alpha(tone(0xFFDADADF, 0xFF2C2C2E), fade));
+        c.drawRoundRect(cell, r0 * s, r0 * s, fill);
+
+        // Draw poster with aspect ratio preserved (cover-fit like roundImage)
+        if (t != null && t.poster != null && !t.poster.isRecycled() && t.posterShader != null) {
+            c.save();
+            // Clip to the rounded rectangle bounds to prevent overflow
+            android.graphics.Path clipPath = new android.graphics.Path();
+            clipPath.addRoundRect(cell, r0 * s, r0 * s, android.graphics.Path.Direction.CW);
+            c.clipPath(clipPath);
+
+            // Scale to cover (like object-fit: cover) - maintains aspect ratio
+            float scaleX = cell.width() / t.poster.getWidth();
+            float scaleY = cell.height() / t.poster.getHeight();
+            float scale = Math.max(scaleX, scaleY);
+            float dw = t.poster.getWidth() * scale;
+            float dh = t.poster.getHeight() * scale;
+
+            c.translate(cell.left + (cell.width() - dw) / 2f, cell.top + (cell.height() - dh) / 2f);
+            c.scale(scale, scale);
             fill.setShader(t.posterShader);
-            c.drawRoundRect(cell, r0 * s, r0 * s, fill);
+            fill.setAlpha(Math.round(255 * fade));
+            c.drawRoundRect(0, 0, t.poster.getWidth(), t.poster.getHeight(), r0 * s / scale, r0 * s / scale, fill);
             fill.setShader(null);
-        } else {
-            fill.setShader(null);
-            fill.setColor(tone(0xFFDADADF, 0xFF2C2C2E));
-            c.drawRoundRect(cell, r0 * s, r0 * s, fill);
+            fill.setAlpha(255);
+            c.restore();
         }
-        // focus sheen and rim
-        if (f > 0.01f) {
+        // focus sheen and rim - apply fade
+        if (f > 0.01f && fade > 0.01f) {
             if (lightSheens.length != cardRects.length) {
                 lightSheens = new LinearGradient[cardRects.length];
                 lightRims = new LinearGradient[cardRects.length];
@@ -3446,7 +3929,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 lightRims[i] = new LinearGradient(0, -bh / 2, 0, bh / 2, 0xE6FFFFFF, 0x59FFFFFF, Shader.TileMode.CLAMP);
                 lightShaderW[i] = bw;
             }
-            int alpha = Math.round(255 * f);
+            int alpha = Math.round(255 * f * fade);
             c.save();
             c.translate(cx, cy);
             c.scale(s, s);
@@ -3464,7 +3947,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             c.restore();
         }
         if (t == null) return;
-        // title below card
+        // title below card - apply fade
+        lCardTitle.setAlpha(Math.round(255 * fade));
+        matchPaint.setAlpha(Math.round(255 * fade));
+        providerPaint.setAlpha(Math.round(255 * fade));
+
         float textY = base.bottom + 36 * k;
         fitPaint.set(lCardTitle);
         c.drawText(TextUtils.ellipsize(t.title, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, textY, lCardTitle);
@@ -3481,12 +3968,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             String prov = TextUtils.ellipsize(t.providers[0], fitPaint, bw - (tx - base.left), TextUtils.TruncateAt.END).toString();
             c.drawText(prov, tx, textY, providerPaint);
         }
-        // reason
-        if (t.reason != null && !t.reason.isEmpty()) {
-            textY += 26 * k;
-            fitPaint.set(reasonPaint);
-            c.drawText(TextUtils.ellipsize(t.reason, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, textY, reasonPaint);
-        }
+
+        // Reset alpha
+        lCardTitle.setAlpha(255);
+        matchPaint.setAlpha(255);
+        providerPaint.setAlpha(255);
     }
 
     /**
@@ -3577,6 +4063,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     int next = Math.max(0, Math.min(bound - 1, cardIndex + dx));
                     if (next == cardIndex) return true;
                     cardIndex = next;
+                    if (kokoMode) {
+                        layoutLight();  // Re-layout cards to adjust widths
+                        syncBackground();  // Update backdrop for selected card
+                    }
                 } else if (dy < 0) {
                     zone = Z_TOP;
                     topIndex = tab;
@@ -3600,12 +4090,40 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                         zone = Z_CARDS;
                         cardIndex = nearest(cardRects, kokoMode ? cardCount : cards.size(), topRects[topIndex].centerX());
                     }
-                } else if (topIndex < 3 && !lightButtons.isEmpty()) {
-                    topIndex = 3;   // up from the tabs reaches the corner buttons without walking the row
+                } else if (dy < 0) {
+                    // Up from tabs: check avatars first (KokoMode), then corner buttons
+                    if (kokoMode && !kokoUsers.isEmpty()) {
+                        AppLog.w("Moving from tabs to avatars, kokoUsers=" + kokoUsers.size());
+                        zone = Z_AVATARS;
+                        avatarIndex = nearest(avatarRects, kokoUsers.size() + 1, topRects[topIndex].centerX());
+                        AppLog.w("Avatar index set to: " + avatarIndex);
+                    } else if (topIndex < 3 && !lightButtons.isEmpty()) {
+                        topIndex = 3;   // up from the tabs reaches the corner buttons without walking the row
+                    } else {
+                        return true;
+                    }
                 } else {
                     return true;
                 }
                 break;
+            case Z_AVATARS: {
+                int avatarCount = kokoUsers.size() + 1;  // users + plus button
+                AppLog.w("Z_AVATARS navigation: dx=" + dx + ", dy=" + dy + ", index=" + avatarIndex + ", count=" + avatarCount);
+                if (dx != 0) {
+                    int next = Math.max(0, Math.min(avatarCount - 1, avatarIndex + dx));
+                    if (next == avatarIndex) return true;
+                    avatarIndex = next;
+                    AppLog.w("Avatar moved to: " + avatarIndex);
+                } else if (dy > 0) {
+                    // Down from avatars to tabs
+                    AppLog.w("Moving down from avatars to tabs");
+                    zone = Z_TOP;
+                    topIndex = nearest(topRects, 3, avatarRects[avatarIndex].centerX());
+                } else {
+                    return true;
+                }
+                break;
+            }
             case Z_HA: {
                 int row = haRow(haIndex), col = haColumn(haIndex);
                 if (dx != 0) {
@@ -3747,10 +4265,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static String haName(int i) {
         switch (i) {
             case HA_LIGHTS: return Ui.tr("Lights On/Off");
-            case HA_MASTER: return Ui.tr("All Lights");
             case HA_BRIGHTNESS: return Ui.tr("Brightness");
             case HA_COZY: return "Cozy Orange";
             case HA_DAYLIGHT: return Ui.tr("Daylight");
+            case HA_LESELICHT: return Ui.tr("Reading Light");
             default: return HomeAssistant.MODES[i];   // the TV light mode's segments
         }
     }
@@ -3759,7 +4277,6 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private boolean haActive(int i) {
         switch (i) {
             case HA_LIGHTS: return ha.areaOn;
-            case HA_MASTER: return ha.masterOn;
             default: return false;
         }
     }
@@ -3774,25 +4291,6 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         // The section's glass, as the shelf's: white by day, smoked at night.
         scene.liquid(c, haRect, HA_RADIUS * k, tone(0xFFFFFFFF, SMOKE), tone(0.3f, 0.14f), tone(0.03f, 0.08f),
                 tone(26, 30) * k, tone(18, 24) * k, tone(0.6f, 0.9f), 1);
-        float base = haRect.top + HA_PAD * k + Ui.cap(haTitle);
-        c.drawText(Ui.tr("Home Assistant"), haRect.left + HA_PAD * k, base, haTitle);
-        // The connection's real state, from the socket itself: green online, red offline, grey without an address.
-        String note;
-        int dot;
-        if (!ha.ready()) {
-            note = Ui.tr("Not set up");
-            dot = tone(0xFF8E8E93, 0xB0FFFFFF);
-        } else if (ha.online) {
-            note = Ui.tr("Online");
-            dot = 0xFF30D158;
-        } else {
-            note = Ui.tr("Offline");
-            dot = 0xFFFF453A;
-        }
-        float right = haRect.right - HA_PAD * k;
-        c.drawText(note, right, base, haHint);
-        haFill.setColor(dot);
-        c.drawCircle(right - haHint.measureText(note) - 10 * k, base - Ui.halfCap(haHint), 4 * k, haFill);
         drawSegments(c);
         for (int i = HA_SEGMENTS; i < HA_COUNT; i++) drawHaCard(c, i);
     }
@@ -3935,10 +4433,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         switch (haIndex) {
             case HA_LIGHTS: ha.toggleArea(); break;
-            case HA_MASTER: ha.toggleMaster(); break;
             case HA_BRIGHTNESS: ha.setBrightness(ha.brightness < 0 ? 50 : ha.brightness); break;
             case HA_COZY: ha.scene(HomeAssistant.SCENE_COZY); break;
-            default: ha.scene(HomeAssistant.SCENE_DAYLIGHT); break;
+            case HA_DAYLIGHT: ha.scene(HomeAssistant.SCENE_DAYLIGHT); break;
+            case HA_LESELICHT: ha.scene(HomeAssistant.SCENE_LESELICHT); break;
         }
     }
 
@@ -3948,7 +4446,6 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (i < HA_SEGMENTS) return name + ", " + (haModeOn(i) ? Ui.tr("On") : Ui.tr("Off"));
         switch (i) {
             case HA_LIGHTS: return name + ", " + (ha.areaOn ? Ui.tr("On") : Ui.tr("Off"));
-            case HA_MASTER: return name + ", " + (ha.masterOn ? Ui.tr("On") : Ui.tr("Off"));
             case HA_BRIGHTNESS: return ha.brightness < 0 ? name : name + ", " + ha.brightness + "%";
             default: return name;
         }

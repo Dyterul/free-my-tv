@@ -53,6 +53,7 @@ final class KokoRecs {
         Bitmap poster;
         BitmapShader posterShader;
         String pkg, link;
+        Bitmap backdropBitmap;
     }
 
     interface Listener { void onKokoRecs(); }
@@ -143,6 +144,7 @@ final class KokoRecs {
                 error = "";
                 resolveProviders();
                 downloadPosters();
+                downloadBackdrops();
             } catch (Exception e) {
                 failedAt = System.currentTimeMillis();
                 error = e.getMessage() == null ? e.toString() : e.getMessage();
@@ -196,9 +198,15 @@ final class KokoRecs {
             }
             users = next;
         }
-        results = parseTitles(json.optJSONArray("results"));
-        movies = parseTitles(json.optJSONArray("movies"));
-        series = parseTitles(json.optJSONArray("series"));
+        // New API structure: mixed.results, movies.results, tv.results
+        JSONObject mixed = json.optJSONObject("mixed");
+        results = mixed != null ? parseTitles(mixed.optJSONArray("results")) : new ArrayList<>();
+
+        JSONObject moviesObj = json.optJSONObject("movies");
+        movies = moviesObj != null ? parseTitles(moviesObj.optJSONArray("results")) : new ArrayList<>();
+
+        JSONObject tvObj = json.optJSONObject("tv");
+        series = tvObj != null ? parseTitles(tvObj.optJSONArray("results")) : new ArrayList<>();
     }
 
     private static List<Title> parseTitles(JSONArray arr) {
@@ -311,6 +319,30 @@ final class KokoRecs {
                     any = true;
                 } catch (Exception e) {
                     AppLog.w("kokohome poster: " + e.getMessage());
+                }
+            }
+        }
+        if (any) notifyListeners();
+    }
+
+    private void downloadBackdrops() {
+        File dir = new File(context.getCacheDir(), "kokohome");
+        //noinspection ResultOfMethodCallIgnored
+        dir.mkdirs();
+        boolean any = false;
+        for (List<Title> list : new List[] {results, movies, series}) {
+            for (Title t : list) {
+                if (t.backdropUrl.isEmpty() || t.backdropBitmap != null) continue;
+                try {
+                    File f = new File(dir, "bd_" + safe(t.backdropUrl));
+                    if (!f.exists()) download(t.backdropUrl, f);
+                    BitmapFactory.Options opts = new BitmapFactory.Options();
+                    Bitmap bmp = BitmapFactory.decodeFile(f.getPath(), opts);
+                    if (bmp == null) continue;
+                    t.backdropBitmap = bmp;
+                    any = true;
+                } catch (Exception e) {
+                    AppLog.w("kokohome backdrop: " + e.getMessage());
                 }
             }
         }

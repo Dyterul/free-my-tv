@@ -57,6 +57,7 @@ final class HomeAssistant {
     static final String[] MODES = {"Aus", "TV-AmbientLight", "DreamView"};
     static final String SCENE_COZY = "scene.cozy_orange";
     static final String SCENE_DAYLIGHT = "scene.wohnzimmer_tageslicht";
+    static final String SCENE_LESELICHT = "scene.leselicht";
     /** The slider's steps, in percent. */
     static final int STEP = 10;
 
